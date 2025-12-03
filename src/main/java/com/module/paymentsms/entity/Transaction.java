@@ -28,9 +28,15 @@ public class Transaction {
     @Column(name = "invoice_id")
     private String invoiceId;
 
+    private String provider; // INTASEND, PAYSTACK, STRIPE
+
+    private String sender;
+
     private String method; // MOBILE_WALLET, BANK_TRANSFER, CARD_PAYMENT
 
     private String type; // CREDIT, DEBIT
+
+    private String currency;
 
     private BigDecimal amount;
 
@@ -52,4 +58,8 @@ public class Transaction {
 
     @OneToMany(mappedBy = "transaction", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
     private List<TransactionCallback> callbacks;
+
+    @ManyToOne
+    @JoinColumn(name = "wallet_id")
+    private Wallet wallet;
 }
