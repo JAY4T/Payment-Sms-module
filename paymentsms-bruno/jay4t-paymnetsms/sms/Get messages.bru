@@ -1,0 +1,31 @@
+meta {
+  name: Get messages
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{base_url}}/sms?service&provider&sender&recipient=0794649026&status=DELIVERED&celcomMessageId&createdAtStartDate&createdAtEndDate&updatedAtStartDate&updatedAtEndDate&page=1&size=10
+  body: none
+  auth: inherit
+}
+
+params:query {
+  service: 
+  provider: 
+  sender: 
+  recipient: 0794649026
+  status: DELIVERED
+  celcomMessageId: 
+  createdAtStartDate: 
+  createdAtEndDate: 
+  updatedAtStartDate: 
+  updatedAtEndDate: 
+  page: 1
+  size: 10
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}

@@ -1,0 +1,15 @@
+meta {
+  name: Intasend checkout
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{base_url}}/intasend/transaction
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+}

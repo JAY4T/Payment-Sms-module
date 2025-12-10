@@ -10,6 +10,7 @@ public class WalletDtoMapper {
     public WalletDto toWalletDto(Wallet wallet) {
         return WalletDto.builder()
                 .id(wallet.getId())
+                .intasendWalletId(wallet.getIntasendWalletId())
                 .name(wallet.getName())
                 .description(wallet.getDescription())
                 .balance(wallet.getBalance() != null ? String.valueOf(wallet.getBalance()) : null)

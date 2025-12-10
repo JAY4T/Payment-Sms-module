@@ -20,7 +20,7 @@ public class TransactionCallback {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(columnDefinition = "LONGTEXT")
+    @Column(columnDefinition = "TEXT")
     private String body;
 
     @Column(name = "created_at")

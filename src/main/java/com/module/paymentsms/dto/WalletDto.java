@@ -13,6 +13,7 @@ import java.time.LocalDateTime;
 @SuperBuilder
 public class WalletDto {
     private Long id;
+    private String intasendWalletId;
     private String name;
     private String description;
     private String balance;

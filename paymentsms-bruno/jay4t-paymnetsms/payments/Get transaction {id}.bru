@@ -1,0 +1,27 @@
+meta {
+  name: Get transaction {id}
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{base_url}}/intasend/transaction/checkout
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "amount": 10,
+    "currency": "KES",
+    "method": "M-PESA",
+    "phoneNumber": "254794649026",
+    "walletId": 1,
+    "narration": "Buy ticket for match: Team A vs Team B"
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}

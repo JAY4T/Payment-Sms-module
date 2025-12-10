@@ -28,7 +28,7 @@ public class SmsMessage {
 
     private String recipient;
 
-    @Column(columnDefinition = "LONGTEXT")
+    @Column(columnDefinition = "TEXT")
     private String message;
 
     private String status; //DELIVERED, NOT_DELIVERED
