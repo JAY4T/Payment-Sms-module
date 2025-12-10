@@ -1,7 +1,9 @@
 package com.module.paymentsms.mapper;
 
+import com.module.paymentsms.dto.TransactionCallbackDto;
 import com.module.paymentsms.dto.TransactionDto;
 import com.module.paymentsms.entity.Transaction;
+import com.module.paymentsms.entity.TransactionCallback;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -23,6 +25,15 @@ public class TransactionDtoMapper {
                 .failureReason(transaction.getFailureReason())
                 .createdAt(transaction.getCreatedAt())
                 .updatedAt(transaction.getUpdatedAt())
+                .build();
+    }
+
+    public TransactionCallbackDto toTransactionCallbackDto(TransactionCallback transactionCallback) {
+        return TransactionCallbackDto.builder()
+                .id(transactionCallback.getId())
+                .body(transactionCallback.getBody())
+                .transactionId(transactionCallback.getTransaction().getId())
+                .createdAt(transactionCallback.getCreatedAt())
                 .build();
     }
 }

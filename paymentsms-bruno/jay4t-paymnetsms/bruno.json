@@ -1,0 +1,9 @@
+{
+  "version": "1",
+  "name": "jay4t-paymentsms",
+  "type": "collection",
+  "ignore": [
+    "node_modules",
+    ".git"
+  ]
+}
