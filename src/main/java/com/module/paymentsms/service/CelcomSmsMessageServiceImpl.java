@@ -29,7 +29,7 @@ import java.util.stream.Collectors;
 
 @Service
 @Slf4j
-public class SmsMessageServiceImpl implements SmsMessageService {
+public class CelcomSmsMessageServiceImpl implements CelcomSmsMessageService {
     private final SmsMessageDao smsMessageDao;
     private final SmsMessageDtoMapper smsMessageDtoMapper;
 
@@ -40,7 +40,7 @@ public class SmsMessageServiceImpl implements SmsMessageService {
     private String celcomApiKey;
 
     @Autowired
-    public SmsMessageServiceImpl(
+    public CelcomSmsMessageServiceImpl(
             SmsMessageDao smsMessageDao,
             SmsMessageDtoMapper smsMessageDtoMapper
     ) {

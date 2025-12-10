@@ -84,6 +84,14 @@ public class IntasendWalletControllerImpl implements IntasendWalletController{
             @RequestParam(defaultValue = "10") Integer size
     ) {
         try {
+            // Validate pagination parameters (1-based pagination)
+            if (page < 1) {
+                return buildResponse.error("Page number must be greater than or equal to 1", null, HttpStatus.BAD_REQUEST);
+            }
+            if (size < 1) {
+                return buildResponse.error("Page size must be greater than or equal to 1", null, HttpStatus.BAD_REQUEST);
+            }
+
             log.info("Retrieving wallets with filters - name: {}, isSystemWallet: {}, page: {}, size: {}", 
                     name, isSystemWallet, page, size);
             

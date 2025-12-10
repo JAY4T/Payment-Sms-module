@@ -73,6 +73,14 @@ public class TransactionControllerImpl implements TransactionController{
             @RequestParam(defaultValue = "10") Integer size
     ) {
         try {
+            // Validate pagination parameters (1-based pagination)
+            if (page < 1) {
+                return buildResponse.error("Page number must be greater than or equal to 1", null, HttpStatus.BAD_REQUEST);
+            }
+            if (size < 1) {
+                return buildResponse.error("Page size must be greater than or equal to 1", null, HttpStatus.BAD_REQUEST);
+            }
+
             log.info("Retrieving transactions with filters - walletId: {}, provider: {}, status: {}, page: {}, size: {}", 
                     walletId, provider, status, page, size);
             
@@ -115,6 +123,14 @@ public class TransactionControllerImpl implements TransactionController{
             @RequestParam(defaultValue = "10") Integer size
     ) {
         try {
+            // Validate pagination parameters (1-based pagination)
+            if (page < 1) {
+                return buildResponse.error("Page number must be greater than or equal to 1", null, HttpStatus.BAD_REQUEST);
+            }
+            if (size < 1) {
+                return buildResponse.error("Page size must be greater than or equal to 1", null, HttpStatus.BAD_REQUEST);
+            }
+
             log.info("Retrieving transaction callbacks - transactionId: {}, page: {}, size: {}", 
                     transactionId, page, size);
             
