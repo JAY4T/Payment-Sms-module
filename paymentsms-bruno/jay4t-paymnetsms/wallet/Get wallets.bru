@@ -1,0 +1,21 @@
+meta {
+  name: Get wallets
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{base_url}}/intasend/wallet?page=1&size=10
+  body: none
+  auth: inherit
+}
+
+params:query {
+  page: 1
+  size: 10
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}

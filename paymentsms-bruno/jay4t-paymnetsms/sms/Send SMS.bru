@@ -1,0 +1,25 @@
+meta {
+  name: Send SMS
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{base_url}}/sms/send
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "sender": "LigiOpen",
+    "recipient": "0794649026",
+    "service": "LIGIOPEN",
+    "message": "Don't miss the big match! [Team A] takes on [Team B] this Saturday at 4:00 PM. Venue: [City Stadium]. Get your tickets now: https://ligiopen.com/tickets. See you there!"
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}
