@@ -1,6 +1,6 @@
 {
   "version": "1",
-  "name": "jay4t-paymentsms",
+  "name": "paymentsms",
   "type": "collection",
   "ignore": [
     "node_modules",

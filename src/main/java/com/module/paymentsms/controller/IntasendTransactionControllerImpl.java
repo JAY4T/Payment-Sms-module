@@ -1,7 +1,8 @@
 package com.module.paymentsms.controller;
 
 import com.module.paymentsms.config.BuildResponse;
-import com.module.paymentsms.dto.CheckoutCreationDto;
+import com.module.paymentsms.dto.IntasendCheckoutCreationDto;
+import com.module.paymentsms.dto.IntasendMpesaBTBPaybillDto;
 import com.module.paymentsms.dto.TransactionDto;
 import com.module.paymentsms.service.IntasendTransactionService;
 import lombok.extern.slf4j.Slf4j;
@@ -30,12 +31,23 @@ public class IntasendTransactionControllerImpl implements IntasendTransactionCon
 
     @Override
     @PostMapping("/checkout")
-    public ResponseEntity<Object> checkout(@RequestBody CheckoutCreationDto checkoutCreationDto) throws Exception {
+    public ResponseEntity<Object> checkout(@RequestBody IntasendCheckoutCreationDto intasendCheckoutCreationDto) throws Exception {
         try {
-            TransactionDto transaction = intasendTransactionService.checkout(checkoutCreationDto);
+            TransactionDto transaction = intasendTransactionService.checkout(intasendCheckoutCreationDto);
             return buildResponse.success(transaction, "Checkout initiated successfully", null, HttpStatus.CREATED);
         } catch (Exception e) {
             log.error("Error during checkout: {}", e.getMessage(), e);
+            return buildResponse.error("Checkout failed: " + e.getMessage(), null, HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    @Override
+    @PostMapping("/btb-paybill")
+    public ResponseEntity<Object> btbPayBill(@RequestBody IntasendMpesaBTBPaybillDto intasendMpesaBTBPaybillDto) {
+        try {
+            TransactionDto transaction = intasendTransactionService.btbPayBill(intasendMpesaBTBPaybillDto);
+            return buildResponse.success(transaction, "Pay bill checkout initiated successfully", null, HttpStatus.OK);
+        } catch (Exception e) {
             return buildResponse.error("Checkout failed: " + e.getMessage(), null, HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }

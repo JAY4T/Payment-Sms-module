@@ -2,6 +2,7 @@ package com.module.paymentsms.dao;
 
 import com.module.paymentsms.entity.Transaction;
 import com.module.paymentsms.entity.TransactionCallback;
+import com.module.paymentsms.entity.TransactionMetaData;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.NoResultException;
 import jakarta.persistence.TypedQuery;
@@ -62,6 +63,20 @@ public class TransactionDaoImpl implements TransactionDao{
             TypedQuery<Transaction> query = entityManager.createQuery(
                     "SELECT t FROM Transaction t WHERE t.transactionRef = :reference", Transaction.class);
             query.setParameter("reference", reference);
+            return query.getSingleResult();
+        } catch (NoResultException e) {
+            return null;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+    
+    @Override
+    public Transaction getTransactionByIntasendTrackingId(String trackingId) {
+        try {
+            TypedQuery<Transaction> query = entityManager.createQuery(
+                    "SELECT t FROM Transaction t WHERE t.intasendTrackingId = :trackingId", Transaction.class);
+            query.setParameter("trackingId", trackingId);
             return query.getSingleResult();
         } catch (NoResultException e) {
             return null;
@@ -187,5 +202,11 @@ public class TransactionDaoImpl implements TransactionDao{
         Pageable adjustedPageable = PageRequest.of(pageNumber, pageSize, pageable.getSort());
         
         return new PageImpl<>(results, adjustedPageable, totalCount);
+    }
+    
+    @Override
+    public TransactionMetaData createTransactionMetaData(TransactionMetaData transactionMetaData) {
+        entityManager.persist(transactionMetaData);
+        return transactionMetaData;
     }
 }

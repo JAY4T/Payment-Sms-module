@@ -1,0 +1,32 @@
+meta {
+  name: Intasend btb checkout
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{base_url}}/intasend/transaction/btb-paybill
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "walletId": 2,
+    "currency": "KES",
+    "requiresApproval": true,
+    "transactions": [
+      {
+        "amount": 10,
+        "paybillNumber": "888880",
+        "accountReference": "14467563111",
+        "narration": "Buy units"
+      }
+    ]
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}

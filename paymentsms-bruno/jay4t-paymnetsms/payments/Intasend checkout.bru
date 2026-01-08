@@ -5,11 +5,23 @@ meta {
 }
 
 post {
-  url: {{base_url}}/intasend/transaction
-  body: none
+  url: {{base_url}}/intasend/transaction/checkout
+  body: json
   auth: inherit
+}
+
+body:json {
+  {
+    "amount": 10,
+    "currency": "KES",
+    "method": "M-PESA",
+    "phoneNumber": "254794649026",
+    "walletId": 1,
+    "narration": "Buy ticket"
+  }
 }
 
 settings {
   encodeUrl: true
+  timeout: 0
 }
