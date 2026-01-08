@@ -768,7 +768,75 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
 
     @Override
     public TransactionDto handleCollectionCallback(Map<String, Object> data) {
-        return null;
+        try {
+            String apiRef = data.get("api_ref").toString();
+            Transaction transaction = transactionDao.getTransactionByReference(apiRef);
+
+            if (transaction == null) {
+                log.error("Transaction not found for api_ref: {}", apiRef);
+                return null;
+            }
+
+            LocalDateTime now = LocalDateTime.now();
+
+            Gson gson = new Gson();
+            String jsonBody = gson.toJson(data);
+
+            TransactionCallback transactionCallback = TransactionCallback.builder()
+                    .transaction(transaction)
+                    .body(jsonBody)
+                    .createdAt(now)
+                    .build();
+
+            transactionDao.createTransactionCallback(transactionCallback);
+
+            String state = data.get("state").toString().toLowerCase();
+            String charges = data.get("charges").toString();
+            String provider = data.get("provider").toString();
+            String account = data.get("account").toString();
+            String currency = data.get("currency").toString();
+            String invoiceId = data.get("invoice_id").toString();
+
+            transaction.setProvider(provider);
+            transaction.setSender(account);
+            transaction.setCurrency(currency);
+            transaction.setInvoiceId(invoiceId);
+            transaction.setUpdatedAt(now);
+
+            switch (state) {
+                case "complete":
+                    transaction.setStatus("COMPLETED");
+                    transaction.setFee(new BigDecimal(charges));
+                    pendingTransactions.remove(transaction.getId());
+                    break;
+
+                case "cancelled":
+                case "failed":
+                    transaction.setStatus("FAILED");
+                    if (data.containsKey("failed_reason")) {
+                        transaction.setFailureReason(data.get("failed_reason").toString());
+                    }
+                    pendingTransactions.remove(transaction.getId());
+                    break;
+
+                case "processing":
+                    transaction.setStatus("PROCESSING");
+                    break;
+
+                default:
+                    log.warn("Unknown transaction state: {} for transaction {}", state, apiRef);
+            }
+
+            transactionDao.updateTransaction(transaction);
+
+            log.info("Callback processed for transaction {}: status={}", apiRef, transaction.getStatus());
+
+            return transactionDtoMapper.toTransactionDto(transaction);
+
+        } catch (Exception e) {
+            log.error("Error processing callback", e);
+            return null;
+        }
     }
 
     @Override

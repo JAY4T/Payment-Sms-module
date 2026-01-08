@@ -83,11 +83,11 @@ public class IntasendTransactionControllerImpl implements IntasendTransactionCon
     }
 
     @Override
-    @PostMapping("/callback")
-    public ResponseEntity<Object> handleCallback(@RequestBody Map<String, Object> data) {
+    @PostMapping("/collection-callback")
+    public ResponseEntity<Object> handleCollectionCallback(@RequestBody Map<String, Object> data) {
         try {
             log.info("Received transaction callback: {}", data);
-            TransactionDto transaction = intasendTransactionService.handleCallback(data);
+            TransactionDto transaction = intasendTransactionService.handleCollectionCallback(data);
             if (transaction == null) {
                 return buildResponse.error("Failed to process callback", null, HttpStatus.OK);
             }

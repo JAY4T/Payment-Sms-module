@@ -11,5 +11,5 @@ public interface IntasendTransactionController {
     ResponseEntity<Object> btbPayBill(IntasendMpesaBTBPaybillDto intasendMpesaBTBPaybillDto);
     ResponseEntity<Object> getTransactionById(Long id);
     ResponseEntity<Object> getTransactionByRef(String transactionRef);
-    ResponseEntity<Object> handleCallback(Map<String, Object> data);
+    ResponseEntity<Object> handleCollectionCallback(Map<String, Object> data);
 }
