@@ -767,6 +767,7 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
     }
 
     @Override
+    @Transactional
     public TransactionDto handleCollectionCallback(Map<String, Object> data) {
         try {
             String apiRef = data.get("api_ref").toString();
