@@ -28,13 +28,19 @@ public class Transaction {
     @Column(name = "invoice_id")
     private String invoiceId;
 
-    private String provider; // INTASEND, PAYSTACK, STRIPE
+    @Column(name = "intasend_tracking_id")
+    private String intasendTrackingId;
+    
+    @Column(name = "intasend_transaction_id")
+    private String intasendTransactionId;
+
+    private String provider;
 
     private String sender;
 
-    private String method; // MOBILE_WALLET, BANK_TRANSFER, CARD_PAYMENT
+    private String method;
 
-    private String type; // CREDIT, DEBIT
+    private String type;
 
     private String currency;
 
@@ -42,13 +48,19 @@ public class Transaction {
 
     private BigDecimal fee;
 
-    private String status; // PENDING, PROCESSING, COMPLETED, FAILED
+    private String status;
 
     @Column(columnDefinition = "TEXT")
     private String narration;
 
+    @Column(columnDefinition = "TEXT")
+    private String notes;
+
     @Column(name = "failure_reason", columnDefinition = "TEXT")
     private String failureReason;
+    
+    @Column(name = "has_batch")
+    private Boolean hasBatch;
 
     @Column(name = "created_at")
     private LocalDateTime createdAt;
@@ -58,6 +70,16 @@ public class Transaction {
 
     @OneToMany(mappedBy = "transaction", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
     private List<TransactionCallback> callbacks;
+
+    @OneToMany(mappedBy = "transaction", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
+    private List<TransactionMetaData> transactionMetaData;
+    
+    @OneToMany(mappedBy = "parentTransaction", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
+    private List<Transaction> batchTransactions;
+    
+    @ManyToOne
+    @JoinColumn(name = "parent_transaction_id")
+    private Transaction parentTransaction;
 
     @ManyToOne
     @JoinColumn(name = "wallet_id")

@@ -11,11 +11,11 @@ import java.math.BigDecimal;
 @AllArgsConstructor
 @NoArgsConstructor
 @SuperBuilder
-public class CheckoutCreationDto {
+public class IntasendCheckoutCreationDto {
     private BigDecimal amount;
     private String currency;
     private String method; // M-PESA, PAYMENT_LINK
     private String phoneNumber;
     private Long walletId;
-    private String narration; // Reason
+    private String notes; // Reason
 }

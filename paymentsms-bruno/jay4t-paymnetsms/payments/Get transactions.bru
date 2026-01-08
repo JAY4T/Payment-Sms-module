@@ -1,17 +1,18 @@
 meta {
   name: Get transactions
   type: http
-  seq: 3
+  seq: 4
 }
 
 get {
-  url: {{base_url}}/intasend/transaction/:id
+  url: {{base_url}}/transaction?page=1&size=10
   body: json
   auth: inherit
 }
 
-params:path {
-  id: 4
+params:query {
+  page: 1
+  size: 10
 }
 
 body:json {

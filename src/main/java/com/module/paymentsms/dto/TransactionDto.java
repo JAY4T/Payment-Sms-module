@@ -23,6 +23,7 @@ public class TransactionDto {
     private String status;
     private String type;
     private String narration;
+    private String notes;
     private String failureReason;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
