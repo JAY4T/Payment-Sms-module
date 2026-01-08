@@ -83,7 +83,7 @@ public class IntasendTransactionControllerImpl implements IntasendTransactionCon
     }
 
     @Override
-    @PostMapping("/collection-callback")
+    @PostMapping("/collection-webhook")
     public ResponseEntity<Object> handleCollectionCallback(@RequestBody Map<String, Object> data) {
         try {
             log.info("Received transaction callback: {}", data);
