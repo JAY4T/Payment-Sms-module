@@ -13,5 +13,6 @@ public interface IntasendWalletService {
     WalletDto updateWallet(WalletUpdateDto walletUpdateDto);
     WalletDto getWalletById(Long id);
     PaginationDto<WalletDto> getAllWallets(String name, Boolean isSystemWallet, LocalDateTime createdAtStartDate, LocalDateTime createdAtEndDate, LocalDateTime updatedAtStartDate, LocalDateTime updatedAtEndDate, Integer page, Integer size);
+    WalletDto syncWallet(Long id);
 
 }

@@ -13,10 +13,11 @@ public interface IntasendTransactionService {
     TransactionDto btbBankPayout(IntasendBankPayoutDto intasendBankPayoutDto);
 
     TransactionDto approveSendMoneyTransaction(String transactionTrackingId);
+    TransactionDto reconcileCollectionTransaction(Long id) throws Exception;
+    TransactionDto reconcileSendMoneyTransaction(Long id) throws Exception;
     TransactionDto getTransactionById(Long id);
     TransactionDto getTransactionByRef(String transactionRef);
     TransactionDto handleCallback(Map<String, Object> data);
-    TransactionDto handleCollectionCallback(Map<String, Object> data);
     TransactionDto handleSendMoneyCallback(Map<String, Object> data);
     TransactionDto handleReversalCallback(Map<String, Object> data);
     TransactionDto handleWalletTransferCallback(Map<String, Object> data);

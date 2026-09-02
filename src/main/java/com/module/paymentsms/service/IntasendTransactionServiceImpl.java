@@ -1,30 +1,34 @@
 package com.module.paymentsms.service;
 
 import com.google.gson.Gson;
+import com.module.paymentsms.config.RabbitConfig;
 import com.module.paymentsms.dao.TransactionDao;
 import com.module.paymentsms.dao.WalletDao;
 import com.module.paymentsms.dto.*;
-import com.module.paymentsms.entity.Transaction;
-import com.module.paymentsms.entity.TransactionCallback;
-import com.module.paymentsms.entity.TransactionMetaData;
-import com.module.paymentsms.entity.Wallet;
+import com.module.paymentsms.entity.*;
 import com.module.paymentsms.mapper.TransactionDtoMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationContext;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -36,13 +40,20 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
 
     private final TransactionDao transactionDao;
     private final WalletDao walletDao;
+
+    private final IntasendWalletService intasendWalletService;
     private final TransactionDtoMapper transactionDtoMapper;
     private final ApplicationContext applicationContext;
-    
+    private final TransactionTemplate transactionTemplate;
+    private final RabbitTemplate rabbitTemplate;
+
     private final ConcurrentHashMap<Long, LocalDateTime> pendingTransactions = new ConcurrentHashMap<>();
 
     @Value("${intasend.mpesa.checkout.url}")
     private String mpesaCheckoutUrl;
+
+    @Value("${intasend.checkout.url}")
+    private String checkoutUrl;
 
     @Value("${intasend.payment.status.url}")
     private String paymentStatusUrl;
@@ -56,7 +67,10 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
     @Value("${intasend.secret.key}")
     private String intasendSecretKey;
 
-    @Value("intasend.sendmoney.status.url")
+    @Value("${intasend.public.key}")
+    private String intasendPublicKey;
+
+    @Value("${intasend.sendmoney.status.url}")
     private String intasendSendMoneyStatusUrl;
 
 
@@ -64,27 +78,34 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
     public IntasendTransactionServiceImpl(
             TransactionDao transactionDao,
             WalletDao walletDao,
+            IntasendWalletService intasendWalletService,
             TransactionDtoMapper transactionDtoMapper,
-            ApplicationContext applicationContext
+            ApplicationContext applicationContext,
+            PlatformTransactionManager transactionManager,
+            RabbitTemplate rabbitTemplate
     ) {
         this.transactionDao = transactionDao;
         this.walletDao = walletDao;
+        this.intasendWalletService = intasendWalletService;
         this.transactionDtoMapper = transactionDtoMapper;
         this.applicationContext = applicationContext;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
+        this.rabbitTemplate = rabbitTemplate;
     }
 
     @Override
-    @Transactional
     public TransactionDto checkout(IntasendCheckoutCreationDto intasendCheckoutCreationDto) throws Exception {
         LocalDateTime now = LocalDateTime.now();
         String transactionRef = System.currentTimeMillis() + "_" + UUID.randomUUID() + "_MAG";
+
+        TransactionMethod method = intasendCheckoutCreationDto.getMethod();
 
         Wallet wallet = walletDao.getWalletById(intasendCheckoutCreationDto.getWalletId());
 
         Transaction transaction = Transaction.builder()
                 .transactionRef(transactionRef)
                 .sender(intasendCheckoutCreationDto.getPhoneNumber())
-                .method("MOBILE_WALLET")
+                .method(method)
                 .type("CREDIT")
                 .currency(intasendCheckoutCreationDto.getCurrency())
                 .amount(intasendCheckoutCreationDto.getAmount())
@@ -96,26 +117,28 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                 .wallet(wallet)
                 .build();
 
-        transactionDao.createTransaction(transaction);
+        // Committed on its own so the PENDING record survives even if the Intasend call below
+        // fails - it must not share a transaction with the failure-handling update, otherwise
+        // rethrowing after that update rolls back both of them together.
+        transactionTemplate.executeWithoutResult(status -> transactionDao.createTransaction(transaction));
 
         try {
-            intasendMpesaCheckout(transaction);
-            
+            intasendCheckout(transaction, intasendCheckoutCreationDto.getRedirectUrl());
+
             pendingTransactions.put(transaction.getId(), now);
-            
+
             return transactionDtoMapper.toTransactionDto(transaction);
 
         } catch (Exception e) {
             transaction.setStatus("FAILED");
             transaction.setFailureReason(e.getMessage());
             transaction.setUpdatedAt(LocalDateTime.now());
-            transactionDao.updateTransaction(transaction);
+            transactionTemplate.executeWithoutResult(status -> transactionDao.updateTransaction(transaction));
             throw new RuntimeException(e);
         }
     }
 
     @Override
-    @Transactional
     public TransactionDto btcMpesa(IntasendMpesaBTCDto intasendMpesaBTCDto) {
         LocalDateTime now = LocalDateTime.now();
         String batchRef = System.currentTimeMillis() + "_" + UUID.randomUUID() + "_MAG_BATCH";
@@ -134,7 +157,7 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
         Transaction batchTransaction = Transaction.builder()
                 .transactionRef(batchRef)
                 .sender(wallet.getName())
-                .method("MOBILE_WALLET")
+                .method(TransactionMethod.INTASEND_B_T_C_MPESA)
                 .type("DEBIT")
                 .currency(intasendMpesaBTCDto.getCurrency())
                 .amount(totalAmount)
@@ -149,16 +172,14 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                 .wallet(wallet)
                 .build();
 
-        transactionDao.createTransaction(batchTransaction);
-
         List<Transaction> childTransactions = new ArrayList<>();
         for (IntasendMpesaBTCDto.MpesaBTCTransactionDto txnDto : intasendMpesaBTCDto.getTransactions()) {
             String childRef = batchRef + "_CHILD_" + UUID.randomUUID();
-            
+
             Transaction childTransaction = Transaction.builder()
                     .transactionRef(childRef)
                     .sender(txnDto.getRecipientPhoneNumber())
-                    .method("MOBILE_WALLET")
+                    .method(TransactionMethod.INTASEND_B_T_C_MPESA)
                     .type("DEBIT")
                     .currency(intasendMpesaBTCDto.getCurrency())
                     .amount(txnDto.getAmount())
@@ -172,39 +193,51 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                     .transactionMetaData(new ArrayList<>())
                     .wallet(wallet)
                     .build();
-            
-            transactionDao.createTransaction(childTransaction);
+
             childTransactions.add(childTransaction);
         }
 
         batchTransaction.setBatchTransactions(childTransactions);
 
+        // Batch parent + all children committed together, independently of the failure-handling
+        // update below, so they survive even if the Intasend call fails.
+        transactionTemplate.executeWithoutResult(status -> {
+            transactionDao.createTransaction(batchTransaction);
+            for (Transaction child : childTransactions) {
+                transactionDao.createTransaction(child);
+            }
+        });
+
         try {
             intasendB2CMpesa(batchTransaction, intasendMpesaBTCDto);
-            
+
             pendingTransactions.put(batchTransaction.getId(), now);
-            
+
             return transactionDtoMapper.toTransactionDto(batchTransaction);
 
         } catch (Exception e) {
             batchTransaction.setStatus("FAILED");
             batchTransaction.setFailureReason(e.getMessage());
             batchTransaction.setUpdatedAt(LocalDateTime.now());
-            transactionDao.updateTransaction(batchTransaction);
-            
+
             for (Transaction child : childTransactions) {
                 child.setStatus("FAILED");
                 child.setFailureReason("Batch initiation failed: " + e.getMessage());
                 child.setUpdatedAt(LocalDateTime.now());
-                transactionDao.updateTransaction(child);
             }
-            
+
+            transactionTemplate.executeWithoutResult(status -> {
+                transactionDao.updateTransaction(batchTransaction);
+                for (Transaction child : childTransactions) {
+                    transactionDao.updateTransaction(child);
+                }
+            });
+
             throw new RuntimeException(e);
         }
     }
 
     @Override
-    @Transactional
     public TransactionDto btbPayBill(IntasendMpesaBTBPaybillDto intasendMpesaBTBPaybillDto) throws Exception {
         LocalDateTime now = LocalDateTime.now();
         String batchRef = System.currentTimeMillis() + "_" + UUID.randomUUID() + "_MAG_B2B_BATCH";
@@ -223,7 +256,7 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
         Transaction batchTransaction = Transaction.builder()
                 .transactionRef(batchRef)
                 .sender(wallet.getName())
-                .method("MOBILE_WALLET")
+                .method(TransactionMethod.INTASEND_B_T_B_MPESA_PAYBILL)
                 .type("DEBIT")
                 .currency(intasendMpesaBTBPaybillDto.getCurrency())
                 .amount(totalAmount)
@@ -238,16 +271,14 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                 .wallet(wallet)
                 .build();
 
-        transactionDao.createTransaction(batchTransaction);
-
         List<Transaction> childTransactions = new ArrayList<>();
         for (IntasendMpesaBTBPaybillDto.MpesaBTBPaybillTransactionDto txnDto : intasendMpesaBTBPaybillDto.getTransactions()) {
             String childRef = batchRef + "_CHILD_" + UUID.randomUUID();
-            
+
             Transaction childTransaction = Transaction.builder()
                     .transactionRef(childRef)
                     .sender(txnDto.getPaybillNumber() + " - " + txnDto.getAccountReference())
-                    .method("MOBILE_WALLET")
+                    .method(TransactionMethod.INTASEND_B_T_B_MPESA_PAYBILL)
                     .type("DEBIT")
                     .currency(intasendMpesaBTBPaybillDto.getCurrency())
                     .amount(txnDto.getAmount())
@@ -261,39 +292,51 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                     .transactionMetaData(new ArrayList<>())
                     .wallet(wallet)
                     .build();
-            
-            transactionDao.createTransaction(childTransaction);
+
             childTransactions.add(childTransaction);
         }
 
         batchTransaction.setBatchTransactions(childTransactions);
 
+        // Batch parent + all children committed together, independently of the failure-handling
+        // update below, so they survive even if the Intasend call fails.
+        transactionTemplate.executeWithoutResult(status -> {
+            transactionDao.createTransaction(batchTransaction);
+            for (Transaction child : childTransactions) {
+                transactionDao.createTransaction(child);
+            }
+        });
+
         try {
             intasendB2BPayBill(batchTransaction, intasendMpesaBTBPaybillDto);
-            
+
             pendingTransactions.put(batchTransaction.getId(), now);
-            
+
             return transactionDtoMapper.toTransactionDto(batchTransaction);
 
         } catch (Exception e) {
             batchTransaction.setStatus("FAILED");
             batchTransaction.setFailureReason(e.getMessage());
             batchTransaction.setUpdatedAt(LocalDateTime.now());
-            transactionDao.updateTransaction(batchTransaction);
-            
+
             for (Transaction child : childTransactions) {
                 child.setStatus("FAILED");
                 child.setFailureReason("B2B PayBill batch initiation failed: " + e.getMessage());
                 child.setUpdatedAt(LocalDateTime.now());
-                transactionDao.updateTransaction(child);
             }
-            
+
+            transactionTemplate.executeWithoutResult(status -> {
+                transactionDao.updateTransaction(batchTransaction);
+                for (Transaction child : childTransactions) {
+                    transactionDao.updateTransaction(child);
+                }
+            });
+
             throw new RuntimeException(e);
         }
     }
 
     @Override
-    @Transactional
     public TransactionDto btbTillNumber(IntasendMpesaBTBTillDto intasendMpesaBTBTillDto) {
         LocalDateTime now = LocalDateTime.now();
         String batchRef = System.currentTimeMillis() + "_" + UUID.randomUUID() + "_MAG_B2B_TILL_BATCH";
@@ -312,7 +355,7 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
         Transaction batchTransaction = Transaction.builder()
                 .transactionRef(batchRef)
                 .sender(wallet.getName())
-                .method("MOBILE_WALLET")
+                .method(TransactionMethod.INTASEND_B_T_B_MPESA_TILL)
                 .type("DEBIT")
                 .currency(intasendMpesaBTBTillDto.getCurrency())
                 .amount(totalAmount)
@@ -327,16 +370,14 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                 .wallet(wallet)
                 .build();
 
-        transactionDao.createTransaction(batchTransaction);
-
         List<Transaction> childTransactions = new ArrayList<>();
         for (IntasendMpesaBTBTillDto.MpesaBTBTillTransactionDto txnDto : intasendMpesaBTBTillDto.getTransactions()) {
             String childRef = batchRef + "_CHILD_" + UUID.randomUUID();
-            
+
             Transaction childTransaction = Transaction.builder()
                     .transactionRef(childRef)
                     .sender("Till " + txnDto.getTillNumber())
-                    .method("MOBILE_WALLET")
+                    .method(TransactionMethod.INTASEND_B_T_B_MPESA_TILL)
                     .type("DEBIT")
                     .currency(intasendMpesaBTBTillDto.getCurrency())
                     .amount(txnDto.getAmount())
@@ -350,39 +391,51 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                     .transactionMetaData(new ArrayList<>())
                     .wallet(wallet)
                     .build();
-            
-            transactionDao.createTransaction(childTransaction);
+
             childTransactions.add(childTransaction);
         }
 
         batchTransaction.setBatchTransactions(childTransactions);
 
+        // Batch parent + all children committed together, independently of the failure-handling
+        // update below, so they survive even if the Intasend call fails.
+        transactionTemplate.executeWithoutResult(status -> {
+            transactionDao.createTransaction(batchTransaction);
+            for (Transaction child : childTransactions) {
+                transactionDao.createTransaction(child);
+            }
+        });
+
         try {
             intasendB2BTill(batchTransaction, intasendMpesaBTBTillDto);
-            
+
             pendingTransactions.put(batchTransaction.getId(), now);
-            
+
             return transactionDtoMapper.toTransactionDto(batchTransaction);
 
         } catch (Exception e) {
             batchTransaction.setStatus("FAILED");
             batchTransaction.setFailureReason(e.getMessage());
             batchTransaction.setUpdatedAt(LocalDateTime.now());
-            transactionDao.updateTransaction(batchTransaction);
-            
+
             for (Transaction child : childTransactions) {
                 child.setStatus("FAILED");
                 child.setFailureReason("B2B Till batch initiation failed: " + e.getMessage());
                 child.setUpdatedAt(LocalDateTime.now());
-                transactionDao.updateTransaction(child);
             }
-            
+
+            transactionTemplate.executeWithoutResult(status -> {
+                transactionDao.updateTransaction(batchTransaction);
+                for (Transaction child : childTransactions) {
+                    transactionDao.updateTransaction(child);
+                }
+            });
+
             throw new RuntimeException(e);
         }
     }
 
     @Override
-    @Transactional
     public TransactionDto btbBankPayout(IntasendBankPayoutDto intasendBankPayoutDto) {
         LocalDateTime now = LocalDateTime.now();
         String batchRef = System.currentTimeMillis() + "_" + UUID.randomUUID() + "_MAG_BANK_BATCH";
@@ -401,7 +454,7 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
         Transaction batchTransaction = Transaction.builder()
                 .transactionRef(batchRef)
                 .sender(wallet.getName())
-                .method("BANK_TRANSFER")
+                .method(TransactionMethod.INTASEND_BANK_TRANSFER)
                 .type("DEBIT")
                 .currency(intasendBankPayoutDto.getCurrency())
                 .amount(totalAmount)
@@ -416,16 +469,14 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                 .wallet(wallet)
                 .build();
 
-        transactionDao.createTransaction(batchTransaction);
-
         List<Transaction> childTransactions = new ArrayList<>();
         for (IntasendBankPayoutDto.IntasendBankPayoutTransactionDto txnDto : intasendBankPayoutDto.getTransactions()) {
             String childRef = batchRef + "_CHILD_" + UUID.randomUUID();
-            
+
             Transaction childTransaction = Transaction.builder()
                     .transactionRef(childRef)
                     .sender("Bank Code: " + txnDto.getBankCode() + " - Account: " + txnDto.getAccount())
-                    .method("BANK_TRANSFER")
+                    .method(TransactionMethod.INTASEND_BANK_TRANSFER)
                     .type("DEBIT")
                     .currency(intasendBankPayoutDto.getCurrency())
                     .amount(txnDto.getAmount())
@@ -439,39 +490,51 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                     .transactionMetaData(new ArrayList<>())
                     .wallet(wallet)
                     .build();
-            
-            transactionDao.createTransaction(childTransaction);
+
             childTransactions.add(childTransaction);
         }
 
         batchTransaction.setBatchTransactions(childTransactions);
 
+        // Batch parent + all children committed together, independently of the failure-handling
+        // update below, so they survive even if the Intasend call fails.
+        transactionTemplate.executeWithoutResult(status -> {
+            transactionDao.createTransaction(batchTransaction);
+            for (Transaction child : childTransactions) {
+                transactionDao.createTransaction(child);
+            }
+        });
+
         try {
             intasendBankPayout(batchTransaction, intasendBankPayoutDto);
-            
+
             pendingTransactions.put(batchTransaction.getId(), now);
-            
+
             return transactionDtoMapper.toTransactionDto(batchTransaction);
 
         } catch (Exception e) {
             batchTransaction.setStatus("FAILED");
             batchTransaction.setFailureReason(e.getMessage());
             batchTransaction.setUpdatedAt(LocalDateTime.now());
-            transactionDao.updateTransaction(batchTransaction);
-            
+
             for (Transaction child : childTransactions) {
                 child.setStatus("FAILED");
                 child.setFailureReason("Bank Payout batch initiation failed: " + e.getMessage());
                 child.setUpdatedAt(LocalDateTime.now());
-                transactionDao.updateTransaction(child);
             }
-            
+
+            transactionTemplate.executeWithoutResult(status -> {
+                transactionDao.updateTransaction(batchTransaction);
+                for (Transaction child : childTransactions) {
+                    transactionDao.updateTransaction(child);
+                }
+            });
+
             throw new RuntimeException(e);
         }
     }
 
     @Override
-    @Transactional
     public TransactionDto approveSendMoneyTransaction(String transactionTrackingId) {
         Transaction batchTransaction = transactionDao.getTransactionByIntasendTrackingId(transactionTrackingId);
         
@@ -557,67 +620,272 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
             
             batchTransaction.setStatus(mapIntasendBatchStatusToTransactionStatus(statusCode, status));
             batchTransaction.setUpdatedAt(LocalDateTime.now());
-            
+
             TransactionMetaData approvalMetadata = TransactionMetaData.builder()
                     .type("B2C_BATCH_APPROVAL_RESPONSE")
                     .body(responseJson)
                     .createdAt(LocalDateTime.now())
                     .transaction(batchTransaction)
                     .build();
-            
-            transactionDao.updateTransaction(batchTransaction);
-            transactionDao.createTransactionMetaData(approvalMetadata);
-            
-            for (int i = 0; i < batchTransaction.getBatchTransactions().size() && i < approvedTransactions.size(); i++) {
-                Transaction childTxn = batchTransaction.getBatchTransactions().get(i);
-                Map<String, Object> approvedTxn = approvedTransactions.get(i);
-                
-                String txnStatusCode = approvedTxn.get("status_code").toString();
-                String txnStatus = approvedTxn.get("status").toString();
-                
-                if (approvedTxn.containsKey("charge") && approvedTxn.get("charge") != null) {
-                    childTxn.setFee(new BigDecimal(approvedTxn.get("charge").toString()));
+
+            transactionTemplate.executeWithoutResult(txStatus -> {
+                transactionDao.updateTransaction(batchTransaction);
+                transactionDao.createTransactionMetaData(approvalMetadata);
+
+                for (int i = 0; i < batchTransaction.getBatchTransactions().size() && i < approvedTransactions.size(); i++) {
+                    Transaction childTxn = batchTransaction.getBatchTransactions().get(i);
+                    Map<String, Object> approvedTxn = approvedTransactions.get(i);
+
+                    String txnStatusCode = approvedTxn.get("status_code").toString();
+                    String txnStatus = approvedTxn.get("status").toString();
+
+                    if (approvedTxn.containsKey("charge") && approvedTxn.get("charge") != null) {
+                        childTxn.setFee(new BigDecimal(approvedTxn.get("charge").toString()));
+                    }
+
+                    childTxn.setStatus(mapIntasendTransactionStatusToTransactionStatus(txnStatusCode, txnStatus));
+                    childTxn.setUpdatedAt(LocalDateTime.now());
+
+                    TransactionMetaData childApprovalMetadata = TransactionMetaData.builder()
+                            .type("B2C_TRANSACTION_APPROVAL_RESPONSE")
+                            .body(gson.toJson(approvedTxn))
+                            .createdAt(LocalDateTime.now())
+                            .transaction(childTxn)
+                            .build();
+
+                    transactionDao.updateTransaction(childTxn);
+                    transactionDao.createTransactionMetaData(childApprovalMetadata);
+
+                    log.debug("Child transaction {} approved with status: {}",
+                            childTxn.getTransactionRef(), childTxn.getStatus());
                 }
-                
-                childTxn.setStatus(mapIntasendTransactionStatusToTransactionStatus(txnStatusCode, txnStatus));
-                childTxn.setUpdatedAt(LocalDateTime.now());
-                
-                TransactionMetaData childApprovalMetadata = TransactionMetaData.builder()
-                        .type("B2C_TRANSACTION_APPROVAL_RESPONSE")
-                        .body(gson.toJson(approvedTxn))
-                        .createdAt(LocalDateTime.now())
-                        .transaction(childTxn)
-                        .build();
-                
-                transactionDao.updateTransaction(childTxn);
-                transactionDao.createTransactionMetaData(childApprovalMetadata);
-                
-                log.debug("Child transaction {} approved with status: {}", 
-                        childTxn.getTransactionRef(), childTxn.getStatus());
-            }
-            
-            log.info("Batch approval complete - Batch: {}, Status: {}, Children updated: {}", 
-                    batchTransaction.getTransactionRef(), batchTransaction.getStatus(), 
+            });
+
+            log.info("Batch approval complete - Batch: {}, Status: {}, Children updated: {}",
+                    batchTransaction.getTransactionRef(), batchTransaction.getStatus(),
                     batchTransaction.getBatchTransactions().size());
-            
+
             return transactionDtoMapper.toTransactionDto(batchTransaction);
-            
+
         } catch (Exception e) {
             log.error("Error approving batch transaction: {}", transactionTrackingId, e);
-            
+
             batchTransaction.setStatus("FAILED");
             batchTransaction.setFailureReason("Approval failed: " + e.getMessage());
             batchTransaction.setUpdatedAt(LocalDateTime.now());
-            transactionDao.updateTransaction(batchTransaction);
-            
+
             for (Transaction child : batchTransaction.getBatchTransactions()) {
                 child.setStatus("FAILED");
                 child.setFailureReason("Batch approval failed: " + e.getMessage());
                 child.setUpdatedAt(LocalDateTime.now());
-                transactionDao.updateTransaction(child);
             }
-            
+
+            transactionTemplate.executeWithoutResult(txStatus -> {
+                transactionDao.updateTransaction(batchTransaction);
+                for (Transaction child : batchTransaction.getBatchTransactions()) {
+                    transactionDao.updateTransaction(child);
+                }
+            });
+
             throw new RuntimeException("Failed to approve batch: " + e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public TransactionDto reconcileCollectionTransaction(Long id) throws Exception {
+        Transaction transaction = transactionDao.getTransactionById(id);
+        if (transaction == null) {
+            throw new RuntimeException("Transaction not found with ID: " + id);
+        }
+
+        TransactionMethod method = transaction.getMethod();
+        if (method != TransactionMethod.INTASEND_MPESA_STK && method != TransactionMethod.INTASEND_CHECKOUT_LINK) {
+            throw new RuntimeException("Transaction " + id + " has method " + method +
+                    " - not a collection transaction. Use reconcileSendMoneyTransaction instead.");
+        }
+
+        if ("COMPLETED".equals(transaction.getStatus()) || "FAILED".equals(transaction.getStatus())) {
+            log.debug("Transaction {} already settled with status {} - skipping Intasend reconciliation call", id, transaction.getStatus());
+            return transactionDtoMapper.toTransactionDto(transaction);
+        }
+
+        if (transaction.getInvoiceId() == null) {
+            throw new RuntimeException("Transaction " + id + " has no invoice_id yet - it never reached Intasend");
+        }
+
+        Gson gson = new Gson();
+        String requestBody = gson.toJson(Map.of("invoice_id", transaction.getInvoiceId()));
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(new URI(paymentStatusUrl))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .header("Authorization", "Bearer " + intasendSecretKey)
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                .build();
+
+        HttpClient httpClient = HttpClient.newHttpClient();
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+        if (response.statusCode() != HttpStatus.OK.value()) {
+            throw new RuntimeException("Intasend status check failed - HTTP " + response.statusCode() + ": " + response.body());
+        }
+
+        Map<String, Object> responseMap = gson.fromJson(response.body(), Map.class);
+        Map<String, Object> invoice = (Map<String, Object>) responseMap.get("invoice");
+
+        if (invoice == null) {
+            throw new RuntimeException("No invoice data returned by Intasend for invoice_id: " + transaction.getInvoiceId());
+        }
+
+        // Reuse the real webhook handler by synthesizing the same payload shape it expects,
+        // instead of duplicating the state-mapping logic here.
+        Map<String, Object> callbackPayload = new HashMap<>();
+        callbackPayload.put("api_ref", invoice.get("api_ref"));
+        callbackPayload.put("state", invoice.get("state"));
+        callbackPayload.put("charges", invoice.getOrDefault("charges", "0"));
+        callbackPayload.put("provider", invoice.getOrDefault("provider", ""));
+        callbackPayload.put("account", invoice.getOrDefault("account", ""));
+        callbackPayload.put("currency", invoice.getOrDefault("currency", transaction.getCurrency()));
+        callbackPayload.put("invoice_id", invoice.getOrDefault("invoice_id", transaction.getInvoiceId()));
+        if (invoice.get("failed_reason") != null) {
+            callbackPayload.put("failed_reason", invoice.get("failed_reason"));
+        }
+        if (invoice.get("clearing_status") != null) {
+            callbackPayload.put("clearing_status", invoice.get("clearing_status"));
+        }
+
+        IntasendTransactionService self = applicationContext.getBean(IntasendTransactionService.class);
+        TransactionDto result = self.handleCallback(callbackPayload);
+
+        if (result == null) {
+            throw new RuntimeException("Reconciliation call to Intasend succeeded but callback processing failed for transaction " + id);
+        }
+
+        return result;
+    }
+
+    @Override
+    public TransactionDto reconcileSendMoneyTransaction(Long id) throws Exception {
+        Transaction transaction = transactionDao.getTransactionById(id);
+        if (transaction == null) {
+            throw new RuntimeException("Transaction not found with ID: " + id);
+        }
+
+        TransactionMethod method = transaction.getMethod();
+        if (method == TransactionMethod.INTASEND_MPESA_STK || method == TransactionMethod.INTASEND_CHECKOUT_LINK) {
+            throw new RuntimeException("Transaction " + id + " has method " + method +
+                    " - not a send money transaction. Use reconcileCollectionTransaction instead.");
+        }
+
+        if ("COMPLETED".equals(transaction.getStatus()) || "FAILED".equals(transaction.getStatus())) {
+            log.debug("Transaction {} already settled with status {} - skipping Intasend reconciliation call", id, transaction.getStatus());
+            return transactionDtoMapper.toTransactionDto(transaction);
+        }
+
+        if (transaction.getIntasendTrackingId() == null) {
+            throw new RuntimeException("Transaction " + id + " has no tracking_id yet - it never reached Intasend");
+        }
+
+        Gson gson = new Gson();
+        String requestBody = gson.toJson(Map.of("tracking_id", transaction.getIntasendTrackingId()));
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(new URI(intasendSendMoneyStatusUrl))
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + intasendSecretKey)
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                .build();
+
+        HttpClient httpClient = HttpClient.newHttpClient();
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+        if (response.statusCode() != HttpStatus.OK.value()) {
+            throw new RuntimeException("Intasend status check failed - HTTP " + response.statusCode() + ": " + response.body());
+        }
+
+        Map<String, Object> responseData = gson.fromJson(response.body(), Map.class);
+        // The status response doesn't echo tracking_id back, but handleSendMoneyCallback needs
+        // it to look the transaction up - it's the same value we just queried with.
+        responseData.put("tracking_id", transaction.getIntasendTrackingId());
+
+        IntasendTransactionService self = applicationContext.getBean(IntasendTransactionService.class);
+        TransactionDto result = self.handleSendMoneyCallback(responseData);
+
+        if (result == null) {
+            throw new RuntimeException("Reconciliation call to Intasend succeeded but callback processing failed for transaction " + id);
+        }
+
+        return result;
+    }
+
+    // Bulk safety-net reconciliation for send-money batches: a DB scan (not tied to the
+    // in-memory pendingTransactions map below, which is limited to 5 minutes post-creation and
+    // is wiped on restart), so this still catches batches that missed their webhook due to
+    // longer delays or a restart in between.
+    @Scheduled(fixedDelay = 60000)
+    public void reconcilePendingSendMoneyBatches() {
+        List<Transaction> pendingBatches = transactionDao.getPendingSendMoneyBatches();
+
+        if (pendingBatches.isEmpty()) {
+            return;
+        }
+
+        log.debug("Bulk reconciling {} pending send money batch(es)", pendingBatches.size());
+
+        IntasendTransactionService self = applicationContext.getBean(IntasendTransactionService.class);
+
+        for (Transaction batch : pendingBatches) {
+            try {
+                self.reconcileSendMoneyTransaction(batch.getId());
+            } catch (Exception e) {
+                log.error("Bulk reconciliation failed for send money batch {}", batch.getId(), e);
+            }
+        }
+    }
+
+    // Same safety net as reconcilePendingSendMoneyBatches, for collection transactions
+    // (INTASEND_MPESA_STK / INTASEND_CHECKOUT_LINK) instead of send-money batches.
+    @Scheduled(fixedDelay = 60000)
+    public void reconcilePendingCollectionTransactions() {
+        List<Transaction> pendingCollections = transactionDao.getPendingCollectionTransactions();
+
+        if (pendingCollections.isEmpty()) {
+            return;
+        }
+
+        log.debug("Bulk reconciling {} pending collection transaction(s)", pendingCollections.size());
+
+        IntasendTransactionService self = applicationContext.getBean(IntasendTransactionService.class);
+
+        for (Transaction transaction : pendingCollections) {
+            try {
+                self.reconcileCollectionTransaction(transaction.getId());
+            } catch (Exception e) {
+                log.error("Bulk reconciliation failed for collection transaction {}", transaction.getId(), e);
+            }
+        }
+    }
+
+    // clearing_status can still change after a transaction is COMPLETED (e.g. moving to
+    // AVAILABLE later), so this keeps checking completed collection transactions until it
+    // settles - lower urgency than the reconciliation jobs above, hence the longer interval.
+    @Scheduled(fixedDelay = 120000)
+    public void updatePendingClearingStatuses() {
+        List<Transaction> pending = transactionDao.getCollectionTransactionsPendingClearingStatus();
+
+        if (pending.isEmpty()) {
+            return;
+        }
+
+        log.debug("Checking clearing status for {} completed collection transaction(s)", pending.size());
+
+        for (Transaction transaction : pending) {
+            try {
+                updateClearingStatus(transaction, Map.of());
+            } catch (Exception e) {
+                log.error("Failed to update clearing status for transaction {}", transaction.getId(), e);
+            }
         }
     }
 
@@ -671,6 +939,8 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                         completedTransactions.add(transactionId);
                     }
                 }
+
+                intasendWalletService.syncWallet(transaction.getWallet().getId());
                 
             } catch (Exception e) {
                 log.error("Error polling transaction {}", transactionId, e);
@@ -696,148 +966,187 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
     @Transactional
     public TransactionDto handleCallback(Map<String, Object> data) {
         try {
-            String apiRef = data.get("api_ref").toString();
-            Transaction transaction = transactionDao.getTransactionByReference(apiRef);
-            
+            Transaction transaction = resolveTransactionFromCallback(data);
+
             if (transaction == null) {
-                log.error("Transaction not found for api_ref: {}", apiRef);
+                log.error("Transaction not found for callback: {}", data);
                 return null;
             }
 
-            LocalDateTime now = LocalDateTime.now();
+            TransactionMethod method = transaction.getMethod();
 
-            Gson gson = new Gson();
-            String jsonBody = gson.toJson(data);
-
-            TransactionCallback transactionCallback = TransactionCallback.builder()
-                    .transaction(transaction)
-                    .body(jsonBody)
-                    .createdAt(now)
-                    .build();
-
-            transactionDao.createTransactionCallback(transactionCallback);
-            
-            String state = data.get("state").toString().toLowerCase();
-            String charges = data.get("charges").toString();
-            String provider = data.get("provider").toString();
-            String account = data.get("account").toString();
-            String currency = data.get("currency").toString();
-            String invoiceId = data.get("invoice_id").toString();
-            
-            transaction.setProvider(provider);
-            transaction.setSender(account);
-            transaction.setCurrency(currency);
-            transaction.setInvoiceId(invoiceId);
-            transaction.setUpdatedAt(now);
-            
-            switch (state) {
-                case "complete":
-                    transaction.setStatus("COMPLETED");
-                    transaction.setFee(new BigDecimal(charges));
-                    pendingTransactions.remove(transaction.getId());
-                    break;
-                    
-                case "cancelled":
-                case "failed":
-                    transaction.setStatus("FAILED");
-                    if (data.containsKey("failed_reason")) {
-                        transaction.setFailureReason(data.get("failed_reason").toString());
-                    }
-                    pendingTransactions.remove(transaction.getId());
-                    break;
-                    
-                case "processing":
-                    transaction.setStatus("PROCESSING");
-                    break;
-                    
-                default:
-                    log.warn("Unknown transaction state: {} for transaction {}", state, apiRef);
+            if (method == TransactionMethod.INTASEND_MPESA_STK || method == TransactionMethod.INTASEND_CHECKOUT_LINK) {
+                return processCollectionCallback(transaction, data);
+            } else {
+                return processSendMoneyCallback(transaction, data);
             }
-            
-            transactionDao.updateTransaction(transaction);
-            
-            log.info("Callback processed for transaction {}: status={}", apiRef, transaction.getStatus());
-            
-            return transactionDtoMapper.toTransactionDto(transaction);
-            
+
         } catch (Exception e) {
             log.error("Error processing callback", e);
             return null;
         }
     }
 
-    @Override
-    @Transactional
-    public TransactionDto handleCollectionCallback(Map<String, Object> data) {
+    // Collection callbacks (api_ref) are keyed by api_ref; send-money callbacks (tracking_id)
+    // are keyed by tracking_id - try whichever key the payload actually carries.
+    private Transaction resolveTransactionFromCallback(Map<String, Object> data) {
+        if (data.get("api_ref") != null) {
+            return transactionDao.getTransactionByReference(data.get("api_ref").toString());
+        }
+        if (data.get("tracking_id") != null) {
+            return transactionDao.getTransactionByIntasendTrackingId(data.get("tracking_id").toString());
+        }
+        return null;
+    }
+
+    private TransactionDto processCollectionCallback(Transaction transaction, Map<String, Object> data) {
+        LocalDateTime now = LocalDateTime.now();
+
+        Gson gson = new Gson();
+        String jsonBody = gson.toJson(data);
+
+        TransactionCallback transactionCallback = TransactionCallback.builder()
+                .transaction(transaction)
+                .body(jsonBody)
+                .createdAt(now)
+                .build();
+
+        transactionDao.createTransactionCallback(transactionCallback);
+
+        String state = data.get("state").toString().toLowerCase();
+        String charges = data.get("charges").toString();
+        String provider = data.get("provider").toString();
+        String account = data.get("account").toString();
+        String currency = data.get("currency").toString();
+        String invoiceId = data.get("invoice_id").toString();
+
+        transaction.setProvider(provider);
+        transaction.setSender(account);
+        transaction.setCurrency(currency);
+        transaction.setInvoiceId(invoiceId);
+        transaction.setUpdatedAt(now);
+
+        switch (state) {
+            case "complete":
+                transaction.setStatus("COMPLETED");
+                transaction.setFee(new BigDecimal(charges));
+                pendingTransactions.remove(transaction.getId());
+                break;
+
+            case "cancelled":
+            case "failed":
+                transaction.setStatus("FAILED");
+                if (data.containsKey("failed_reason")) {
+                    transaction.setFailureReason(data.get("failed_reason").toString());
+                }
+                pendingTransactions.remove(transaction.getId());
+                break;
+
+            case "processing":
+                transaction.setStatus("PROCESSING");
+                break;
+
+            default:
+                log.warn("Unknown transaction state: {} for transaction {}", state, transaction.getTransactionRef());
+        }
+
+        transactionDao.updateTransaction(transaction);
+        intasendWalletService.syncWallet(transaction.getWallet().getId());
+
+        if ("COMPLETED".equals(transaction.getStatus())) {
+            try {
+                updateClearingStatus(transaction, data);
+            } catch (Exception e) {
+                log.error("Failed to update clearing status for transaction {}", transaction.getTransactionRef(), e);
+            }
+        }
+
+        if ("COMPLETED".equals(transaction.getStatus())) {
+            publishTransactionEvent(transaction, "transaction.completed");
+        } else if ("FAILED".equals(transaction.getStatus())) {
+            publishTransactionEvent(transaction, "transaction.failed");
+        }
+
+        log.info("Callback processed for transaction {}: status={}", transaction.getTransactionRef(), transaction.getStatus());
+
+        return transactionDtoMapper.toTransactionDto(transaction);
+    }
+
+    // clearing_status isn't in the webhook or reconciliation payload the same way state is - it
+    // only comes back from the invoice status endpoint. reconcileCollectionTransaction already
+    // has it in hand from its own status check and passes it through `data`; a real incoming
+    // webhook doesn't carry it at all, so this fetches it fresh in that case.
+    private void updateClearingStatus(Transaction transaction, Map<String, Object> data) throws Exception {
+        String clearingStatus = data.get("clearing_status") != null
+                ? data.get("clearing_status").toString()
+                : fetchClearingStatus(transaction.getInvoiceId());
+
+        if (clearingStatus == null || clearingStatus.equals(transaction.getClearingStatus())) {
+            return;
+        }
+
+        transaction.setClearingStatus(clearingStatus);
+        transaction.setUpdatedAt(LocalDateTime.now());
+        transactionTemplate.executeWithoutResult(status -> transactionDao.updateTransaction(transaction));
+
+        log.info("Clearing status updated for transaction {}: {}", transaction.getTransactionRef(), clearingStatus);
+
+        if ("AVAILABLE".equals(clearingStatus)) {
+            publishTransactionEvent(transaction, "transaction.cleared");
+        }
+    }
+
+    // Fire-and-forget: a broker outage must never fail payment processing itself, so any
+    // publish failure is logged and swallowed rather than propagated. Covers all three
+    // producers of a clearing/settlement change - the real webhook (processCollectionCallback),
+    // the manual reconcile endpoint (reconcileCollectionTransaction, which re-enters through
+    // handleCallback), and the scheduled clearing-status sweep (updatePendingClearingStatuses) -
+    // since all three ultimately call updateClearingStatus.
+    private void publishTransactionEvent(Transaction transaction, String routingKey) {
         try {
-            String apiRef = data.get("api_ref").toString();
-            Transaction transaction = transactionDao.getTransactionByReference(apiRef);
-
-            if (transaction == null) {
-                log.error("Transaction not found for api_ref: {}", apiRef);
-                return null;
-            }
-
-            LocalDateTime now = LocalDateTime.now();
-
-            Gson gson = new Gson();
-            String jsonBody = gson.toJson(data);
-
-            TransactionCallback transactionCallback = TransactionCallback.builder()
-                    .transaction(transaction)
-                    .body(jsonBody)
-                    .createdAt(now)
+            TransactionEventDto event = TransactionEventDto.builder()
+                    .id(transaction.getId())
+                    .reference(transaction.getTransactionRef())
+                    .walletId(transaction.getWallet() != null ? transaction.getWallet().getId() : null)
+                    .amount(transaction.getAmount() != null ? String.valueOf(transaction.getAmount()) : null)
+                    .currency(transaction.getCurrency())
+                    .fee(transaction.getFee() != null ? String.valueOf(transaction.getFee()) : null)
+                    .status(transaction.getStatus())
+                    .narration(transaction.getNarration())
                     .build();
-
-            transactionDao.createTransactionCallback(transactionCallback);
-
-            String state = data.get("state").toString().toLowerCase();
-            String charges = data.get("charges").toString();
-            String provider = data.get("provider").toString();
-            String account = data.get("account").toString();
-            String currency = data.get("currency").toString();
-            String invoiceId = data.get("invoice_id").toString();
-
-            transaction.setProvider(provider);
-            transaction.setSender(account);
-            transaction.setCurrency(currency);
-            transaction.setInvoiceId(invoiceId);
-            transaction.setUpdatedAt(now);
-
-            switch (state) {
-                case "complete":
-                    transaction.setStatus("COMPLETED");
-                    transaction.setFee(new BigDecimal(charges));
-                    pendingTransactions.remove(transaction.getId());
-                    break;
-
-                case "cancelled":
-                case "failed":
-                    transaction.setStatus("FAILED");
-                    if (data.containsKey("failed_reason")) {
-                        transaction.setFailureReason(data.get("failed_reason").toString());
-                    }
-                    pendingTransactions.remove(transaction.getId());
-                    break;
-
-                case "processing":
-                    transaction.setStatus("PROCESSING");
-                    break;
-
-                default:
-                    log.warn("Unknown transaction state: {} for transaction {}", state, apiRef);
-            }
-
-            transactionDao.updateTransaction(transaction);
-
-            log.info("Callback processed for transaction {}: status={}", apiRef, transaction.getStatus());
-
-            return transactionDtoMapper.toTransactionDto(transaction);
-
+            rabbitTemplate.convertAndSend(RabbitConfig.TRANSACTIONS_EXCHANGE, routingKey, event);
+            log.info("Published {} for transaction {}", routingKey, transaction.getTransactionRef());
         } catch (Exception e) {
-            log.error("Error processing callback", e);
+            log.error("Failed to publish {} for transaction {}: {}", routingKey, transaction.getTransactionRef(), e.getMessage(), e);
+        }
+    }
+
+    private String fetchClearingStatus(String invoiceId) throws Exception {
+        Gson gson = new Gson();
+        String requestBody = gson.toJson(Map.of("invoice_id", invoiceId));
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(new URI(paymentStatusUrl))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .header("Authorization", "Bearer " + intasendSecretKey)
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                .build();
+
+        HttpClient httpClient = HttpClient.newHttpClient();
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+        if (response.statusCode() != HttpStatus.OK.value()) {
+            log.warn("Failed to fetch clearing status for invoice {}: HTTP {}", invoiceId, response.statusCode());
             return null;
         }
+
+        Map<String, Object> responseMap = gson.fromJson(response.body(), Map.class);
+        Map<String, Object> invoice = (Map<String, Object>) responseMap.get("invoice");
+
+        return invoice != null && invoice.get("clearing_status") != null
+                ? invoice.get("clearing_status").toString()
+                : null;
     }
 
     @Override
@@ -846,97 +1155,118 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
         try {
             String trackingId = data.get("tracking_id").toString();
             Transaction batchTransaction = transactionDao.getTransactionByIntasendTrackingId(trackingId);
-            
+
             if (batchTransaction == null) {
                 log.error("Batch transaction not found for tracking_id: {}", trackingId);
                 return null;
             }
-            
-            if (!batchTransaction.getHasBatch()) {
-                log.warn("Transaction {} is not a batch transaction", trackingId);
-            }
 
-            LocalDateTime now = LocalDateTime.now();
+            return processSendMoneyCallback(batchTransaction, data);
 
-            Gson gson = new Gson();
-            String jsonBody = gson.toJson(data);
-
-            TransactionCallback transactionCallback = TransactionCallback.builder()
-                    .transaction(batchTransaction)
-                    .body(jsonBody)
-                    .createdAt(now)
-                    .build();
-
-            transactionDao.createTransactionCallback(transactionCallback);
-            
-            String statusCode = data.get("status_code").toString();
-            String status = data.get("status").toString();
-            
-            List<Map<String, Object>> transactions = (List<Map<String, Object>>) data.get("transactions");
-            
-            String previousStatus = batchTransaction.getStatus();
-            String newBatchStatus = mapIntasendBatchStatusToTransactionStatus(statusCode, status);
-            batchTransaction.setStatus(newBatchStatus);
-            batchTransaction.setUpdatedAt(now);
-            
-            if (data.containsKey("wallet")) {
-                Map<String, Object> walletData = (Map<String, Object>) data.get("wallet");
-                log.debug("Wallet balance - Current: {}, Available: {}", 
-                    walletData.get("current_balance"), walletData.get("available_balance"));
-            }
-            
-            transactionDao.updateTransaction(batchTransaction);
-            
-            log.info("Send money callback processed for batch {} - Status: {} -> {}", 
-                    trackingId, previousStatus, newBatchStatus);
-            
-            if (batchTransaction.getHasBatch() && transactions != null && !transactions.isEmpty()) {
-                for (Map<String, Object> txnData : transactions) {
-                    String intasendTxnId = txnData.get("transaction_id").toString();
-                    
-                    Transaction childTransaction = batchTransaction.getBatchTransactions().stream()
-                            .filter(child -> intasendTxnId.equals(child.getIntasendTransactionId()))
-                            .findFirst()
-                            .orElse(null);
-                    
-                    if (childTransaction != null) {
-                        String txnStatusCode = txnData.get("status_code").toString();
-                        String txnStatus = txnData.get("status").toString();
-                        
-                        String previousChildStatus = childTransaction.getStatus();
-                        String newChildStatus = mapIntasendTransactionStatusToTransactionStatus(txnStatusCode, txnStatus);
-                        
-                        childTransaction.setStatus(newChildStatus);
-                        childTransaction.setUpdatedAt(now);
-                        
-                        if (txnData.containsKey("amount") && txnData.get("amount") != null) {
-                            childTransaction.setAmount(new BigDecimal(txnData.get("amount").toString()));
-                        }
-                        
-                        if (txnData.containsKey("charge") && txnData.get("charge") != null) {
-                            childTransaction.setFee(new BigDecimal(txnData.get("charge").toString()));
-                        }
-                        
-                        transactionDao.updateTransaction(childTransaction);
-                        
-                        log.debug("Child transaction {} updated: {} -> {}", 
-                                intasendTxnId, previousChildStatus, newChildStatus);
-                    } else {
-                        log.warn("Child transaction not found for intasend_transaction_id: {}", intasendTxnId);
-                    }
-                }
-            }
-            
-            log.info("Send money callback complete - Batch: {}, Status: {}, Children updated: {}", 
-                    batchTransaction.getTransactionRef(), batchTransaction.getStatus(), 
-                    transactions != null ? transactions.size() : 0);
-            
-            return transactionDtoMapper.toTransactionDto(batchTransaction);
-            
         } catch (Exception e) {
             log.error("Error processing send money callback", e);
             return null;
         }
+    }
+
+    private TransactionDto processSendMoneyCallback(Transaction batchTransaction, Map<String, Object> data) {
+        if (!batchTransaction.getHasBatch()) {
+            log.warn("Transaction {} is not a batch transaction", batchTransaction.getTransactionRef());
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+
+        Gson gson = new Gson();
+        String jsonBody = gson.toJson(data);
+
+        TransactionCallback transactionCallback = TransactionCallback.builder()
+                .transaction(batchTransaction)
+                .body(jsonBody)
+                .createdAt(now)
+                .build();
+
+        transactionDao.createTransactionCallback(transactionCallback);
+
+        String statusCode = data.get("status_code").toString();
+        String status = data.get("status").toString();
+
+        List<Map<String, Object>> transactions = (List<Map<String, Object>>) data.get("transactions");
+
+        String previousStatus = batchTransaction.getStatus();
+        String newBatchStatus = mapIntasendBatchStatusToTransactionStatus(statusCode, status);
+        batchTransaction.setStatus(newBatchStatus);
+        batchTransaction.setUpdatedAt(now);
+
+        if (data.containsKey("wallet")) {
+            Map<String, Object> walletData = (Map<String, Object>) data.get("wallet");
+            log.debug("Wallet balance - Current: {}, Available: {}",
+                walletData.get("current_balance"), walletData.get("available_balance"));
+        }
+
+        transactionDao.updateTransaction(batchTransaction);
+
+        log.info("Send money callback processed for batch {} - Status: {} -> {}",
+                batchTransaction.getIntasendTrackingId(), previousStatus, newBatchStatus);
+
+        if (batchTransaction.getHasBatch() && transactions != null && !transactions.isEmpty()) {
+            for (Map<String, Object> txnData : transactions) {
+                String intasendTxnId = txnData.get("transaction_id").toString();
+
+                Transaction childTransaction = batchTransaction.getBatchTransactions().stream()
+                        .filter(child -> intasendTxnId.equals(child.getIntasendTransactionId()))
+                        .findFirst()
+                        .orElse(null);
+
+                if (childTransaction != null) {
+                    String txnStatusCode = txnData.get("status_code").toString();
+                    String txnStatus = txnData.get("status").toString();
+
+                    String previousChildStatus = childTransaction.getStatus();
+                    String newChildStatus = mapIntasendTransactionStatusToTransactionStatus(txnStatusCode, txnStatus);
+
+                    childTransaction.setStatus(newChildStatus);
+                    childTransaction.setUpdatedAt(now);
+
+                    if (txnData.containsKey("amount") && txnData.get("amount") != null) {
+                        childTransaction.setAmount(new BigDecimal(txnData.get("amount").toString()));
+                    }
+
+                    if (txnData.containsKey("charge") && txnData.get("charge") != null) {
+                        childTransaction.setFee(new BigDecimal(txnData.get("charge").toString()));
+                    }
+
+                    if (txnData.containsKey("provider") && txnData.get("provider") != null) {
+                        childTransaction.setProvider(txnData.get("provider").toString());
+                    }
+
+                    transactionDao.updateTransaction(childTransaction);
+
+                    log.debug("Child transaction {} updated: {} -> {}",
+                            intasendTxnId, previousChildStatus, newChildStatus);
+
+                    // Unlike collection settlement, nothing downstream previously learned a
+                    // disbursement settled at all - LigiopenBackendApp has no other way to
+                    // correlate a batch's outcome back to the individual recipients (teams)
+                    // that made it up. Publish per CHILD, not per batch, so each recipient's
+                    // own settlement result is independently addressable - the caller
+                    // correlates back to its own record via this child's narration, which it
+                    // set itself when building the batch request.
+                    if ("COMPLETED".equals(newChildStatus)) {
+                        publishTransactionEvent(childTransaction, "payout.completed");
+                    } else if ("FAILED".equals(newChildStatus)) {
+                        publishTransactionEvent(childTransaction, "payout.failed");
+                    }
+                } else {
+                    log.warn("Child transaction not found for intasend_transaction_id: {}", intasendTxnId);
+                }
+            }
+        }
+
+        log.info("Send money callback complete - Batch: {}, Status: {}, Children updated: {}",
+                batchTransaction.getTransactionRef(), batchTransaction.getStatus(),
+                transactions != null ? transactions.size() : 0);
+
+        return transactionDtoMapper.toTransactionDto(batchTransaction);
     }
 
     @Override
@@ -949,7 +1279,18 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
         return null;
     }
 
-    private Transaction intasendMpesaCheckout(Transaction transaction) throws Exception {
+    private Transaction intasendCheckout(Transaction transaction, String redirectUrl) throws Exception {
+        TransactionMethod method = transaction.getMethod();
+
+        if (method == TransactionMethod.INTASEND_MPESA_STK) {
+            return intasendMpesaStkCheckout(transaction);
+        } else {
+            return intasendCheckoutLink(transaction, redirectUrl);
+        }
+    }
+
+    // Intasend M-Pesa STK push checkout
+    private Transaction intasendMpesaStkCheckout(Transaction transaction) throws Exception {
 
         Map<String, Object> requestBody = Map.of(
                 "amount", String.valueOf(transaction.getAmount()),
@@ -993,12 +1334,61 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
 
         transaction.setInvoiceId(invoiceId);
 
-        transactionDao.updateTransaction(transaction);
+        transactionTemplate.executeWithoutResult(status -> transactionDao.updateTransaction(transaction));
 
         return transaction;
 
     }
-    
+
+    // Intasend hosted checkout link
+    private Transaction intasendCheckoutLink(Transaction transaction, String redirectUrl) throws URISyntaxException, IOException, InterruptedException {
+        Map<String, Object> requestBody = new java.util.HashMap<>(Map.of(
+                "amount", String.valueOf(transaction.getAmount()),
+                "phone_number", transaction.getSender(),
+                "wallet_id", transaction.getWallet().getIntasendWalletId(),
+                "api_ref", transaction.getTransactionRef()
+        ));
+        // Intasend sends the browser here once payment completes - without it, there's no way
+        // for the caller's own app/site to be notified except by polling, since the hosted
+        // checkout page has no "back to merchant" affordance of its own.
+        if (org.springframework.util.StringUtils.hasText(redirectUrl)) {
+            requestBody.put("redirect_url", redirectUrl);
+        }
+
+        Gson gson = new Gson();
+        String jsonBody = gson.toJson(requestBody);
+
+        log.debug("Intasend checkout link request: {}", requestBody);
+
+        HttpRequest postRequest = HttpRequest.newBuilder()
+                .uri(new URI(checkoutUrl))
+                .header("Content-Type", "application/json")
+                .header("X-IntaSend-Public-API-Key", intasendPublicKey)
+                .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
+                .build();
+
+        HttpClient httpClient = HttpClient.newHttpClient();
+        HttpResponse<String> postResponse = httpClient.send(postRequest, HttpResponse.BodyHandlers.ofString());
+
+        log.debug("Intasend checkout link response {}: ", postResponse);
+
+        if (postResponse.statusCode() != HttpStatus.OK.value() && postResponse.statusCode() != HttpStatus.CREATED.value()) {
+            log.error("Failed to initialize checkout link::: Status code {} response body:: {}", postResponse.statusCode(), postResponse.body());
+            throw new RuntimeException("Failed to initialize checkout link::: Status code " + postResponse.statusCode() + " response body:: " + postResponse.body());
+        }
+
+        String jsonString = postResponse.body();
+        Map<String, Object> responseMap = gson.fromJson(jsonString, Map.class);
+
+        String hostedCheckoutUrl = (String) responseMap.get("url");
+
+        transaction.setCheckoutLink(hostedCheckoutUrl);
+
+        transactionTemplate.executeWithoutResult(status -> transactionDao.updateTransaction(transaction));
+
+        return transaction;
+    }
+
     private Transaction intasendB2CMpesa(Transaction batchTransaction, IntasendMpesaBTCDto dto) throws Exception {
         
         List<Map<String, Object>> transactionItems = new ArrayList<>();
@@ -1074,35 +1464,37 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                 .createdAt(LocalDateTime.now())
                 .transaction(batchTransaction)
                 .build();
-        
-        transactionDao.updateTransaction(batchTransaction);
-        transactionDao.createTransactionMetaData(batchMetaData);
 
-        for (int i = 0; i < batchTransaction.getBatchTransactions().size() && i < intasendTransactions.size(); i++) {
-            Transaction childTxn = batchTransaction.getBatchTransactions().get(i);
-            Map<String, Object> intasendTxn = intasendTransactions.get(i);
-            
-            String intasendTxnId = intasendTxn.get("transaction_id").toString();
-            String txnStatusCode = intasendTxn.get("status_code").toString();
-            String txnStatus = intasendTxn.get("status").toString();
-            
-            childTxn.setIntasendTransactionId(intasendTxnId);
-            childTxn.setStatus(mapIntasendTransactionStatusToTransactionStatus(txnStatusCode, txnStatus));
-            childTxn.setUpdatedAt(LocalDateTime.now());
-            
-            TransactionMetaData childMetaData = TransactionMetaData.builder()
-                    .type("B2C_TRANSACTION_INITIATION_RESPONSE")
-                    .body(gson.toJson(intasendTxn))
-                    .createdAt(LocalDateTime.now())
-                    .transaction(childTxn)
-                    .build();
-            
-            transactionDao.updateTransaction(childTxn);
-            transactionDao.createTransactionMetaData(childMetaData);
-            
-            log.debug("Child transaction {} mapped to Intasend transaction_id: {}, status: {}", 
-                    childTxn.getTransactionRef(), intasendTxnId, childTxn.getStatus());
-        }
+        transactionTemplate.executeWithoutResult(txStatus -> {
+            transactionDao.updateTransaction(batchTransaction);
+            transactionDao.createTransactionMetaData(batchMetaData);
+
+            for (int i = 0; i < batchTransaction.getBatchTransactions().size() && i < intasendTransactions.size(); i++) {
+                Transaction childTxn = batchTransaction.getBatchTransactions().get(i);
+                Map<String, Object> intasendTxn = intasendTransactions.get(i);
+
+                String intasendTxnId = intasendTxn.get("transaction_id").toString();
+                String txnStatusCode = intasendTxn.get("status_code").toString();
+                String txnStatus = intasendTxn.get("status").toString();
+
+                childTxn.setIntasendTransactionId(intasendTxnId);
+                childTxn.setStatus(mapIntasendTransactionStatusToTransactionStatus(txnStatusCode, txnStatus));
+                childTxn.setUpdatedAt(LocalDateTime.now());
+
+                TransactionMetaData childMetaData = TransactionMetaData.builder()
+                        .type("B2C_TRANSACTION_INITIATION_RESPONSE")
+                        .body(gson.toJson(intasendTxn))
+                        .createdAt(LocalDateTime.now())
+                        .transaction(childTxn)
+                        .build();
+
+                transactionDao.updateTransaction(childTxn);
+                transactionDao.createTransactionMetaData(childMetaData);
+
+                log.debug("Child transaction {} mapped to Intasend transaction_id: {}, status: {}",
+                        childTxn.getTransactionRef(), intasendTxnId, childTxn.getStatus());
+            }
+        });
 
         log.info("B2C batch saved - Tracking ID: {}, Status: {}, Wallet Balance: {} (Available: {}), Child Transactions: {}", 
                 trackingId, batchTransaction.getStatus(), currentBalance, availableBalance, batchTransaction.getBatchTransactions().size());
@@ -1187,35 +1579,37 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                 .createdAt(LocalDateTime.now())
                 .transaction(batchTransaction)
                 .build();
-        
-        transactionDao.updateTransaction(batchTransaction);
-        transactionDao.createTransactionMetaData(batchMetaData);
 
-        for (int i = 0; i < batchTransaction.getBatchTransactions().size() && i < intasendTransactions.size(); i++) {
-            Transaction childTxn = batchTransaction.getBatchTransactions().get(i);
-            Map<String, Object> intasendTxn = intasendTransactions.get(i);
-            
-            String intasendTxnId = intasendTxn.get("transaction_id").toString();
-            String txnStatusCode = intasendTxn.get("status_code").toString();
-            String txnStatus = intasendTxn.get("status").toString();
-            
-            childTxn.setIntasendTransactionId(intasendTxnId);
-            childTxn.setStatus(mapIntasendTransactionStatusToTransactionStatus(txnStatusCode, txnStatus));
-            childTxn.setUpdatedAt(LocalDateTime.now());
-            
-            TransactionMetaData childMetaData = TransactionMetaData.builder()
-                    .type("B2B_PAYBILL_TRANSACTION_INITIATION_RESPONSE")
-                    .body(gson.toJson(intasendTxn))
-                    .createdAt(LocalDateTime.now())
-                    .transaction(childTxn)
-                    .build();
-            
-            transactionDao.updateTransaction(childTxn);
-            transactionDao.createTransactionMetaData(childMetaData);
-            
-            log.debug("Child B2B PayBill transaction {} mapped to Intasend transaction_id: {}, status: {}", 
-                    childTxn.getTransactionRef(), intasendTxnId, childTxn.getStatus());
-        }
+        transactionTemplate.executeWithoutResult(txStatus -> {
+            transactionDao.updateTransaction(batchTransaction);
+            transactionDao.createTransactionMetaData(batchMetaData);
+
+            for (int i = 0; i < batchTransaction.getBatchTransactions().size() && i < intasendTransactions.size(); i++) {
+                Transaction childTxn = batchTransaction.getBatchTransactions().get(i);
+                Map<String, Object> intasendTxn = intasendTransactions.get(i);
+
+                String intasendTxnId = intasendTxn.get("transaction_id").toString();
+                String txnStatusCode = intasendTxn.get("status_code").toString();
+                String txnStatus = intasendTxn.get("status").toString();
+
+                childTxn.setIntasendTransactionId(intasendTxnId);
+                childTxn.setStatus(mapIntasendTransactionStatusToTransactionStatus(txnStatusCode, txnStatus));
+                childTxn.setUpdatedAt(LocalDateTime.now());
+
+                TransactionMetaData childMetaData = TransactionMetaData.builder()
+                        .type("B2B_PAYBILL_TRANSACTION_INITIATION_RESPONSE")
+                        .body(gson.toJson(intasendTxn))
+                        .createdAt(LocalDateTime.now())
+                        .transaction(childTxn)
+                        .build();
+
+                transactionDao.updateTransaction(childTxn);
+                transactionDao.createTransactionMetaData(childMetaData);
+
+                log.debug("Child B2B PayBill transaction {} mapped to Intasend transaction_id: {}, status: {}",
+                        childTxn.getTransactionRef(), intasendTxnId, childTxn.getStatus());
+            }
+        });
 
         log.info("B2B PayBill batch saved - Tracking ID: {}, Status: {}, Wallet Balance: {} (Available: {}), Child Transactions: {}", 
                 trackingId, batchTransaction.getStatus(), currentBalance, availableBalance, batchTransaction.getBatchTransactions().size());
@@ -1299,35 +1693,37 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                 .createdAt(LocalDateTime.now())
                 .transaction(batchTransaction)
                 .build();
-        
-        transactionDao.updateTransaction(batchTransaction);
-        transactionDao.createTransactionMetaData(batchMetaData);
 
-        for (int i = 0; i < batchTransaction.getBatchTransactions().size() && i < intasendTransactions.size(); i++) {
-            Transaction childTxn = batchTransaction.getBatchTransactions().get(i);
-            Map<String, Object> intasendTxn = intasendTransactions.get(i);
-            
-            String intasendTxnId = intasendTxn.get("transaction_id").toString();
-            String txnStatusCode = intasendTxn.get("status_code").toString();
-            String txnStatus = intasendTxn.get("status").toString();
-            
-            childTxn.setIntasendTransactionId(intasendTxnId);
-            childTxn.setStatus(mapIntasendTransactionStatusToTransactionStatus(txnStatusCode, txnStatus));
-            childTxn.setUpdatedAt(LocalDateTime.now());
-            
-            TransactionMetaData childMetaData = TransactionMetaData.builder()
-                    .type("B2B_TILL_TRANSACTION_INITIATION_RESPONSE")
-                    .body(gson.toJson(intasendTxn))
-                    .createdAt(LocalDateTime.now())
-                    .transaction(childTxn)
-                    .build();
-            
-            transactionDao.updateTransaction(childTxn);
-            transactionDao.createTransactionMetaData(childMetaData);
-            
-            log.debug("Child B2B Till transaction {} mapped to Intasend transaction_id: {}, status: {}", 
-                    childTxn.getTransactionRef(), intasendTxnId, childTxn.getStatus());
-        }
+        transactionTemplate.executeWithoutResult(txStatus -> {
+            transactionDao.updateTransaction(batchTransaction);
+            transactionDao.createTransactionMetaData(batchMetaData);
+
+            for (int i = 0; i < batchTransaction.getBatchTransactions().size() && i < intasendTransactions.size(); i++) {
+                Transaction childTxn = batchTransaction.getBatchTransactions().get(i);
+                Map<String, Object> intasendTxn = intasendTransactions.get(i);
+
+                String intasendTxnId = intasendTxn.get("transaction_id").toString();
+                String txnStatusCode = intasendTxn.get("status_code").toString();
+                String txnStatus = intasendTxn.get("status").toString();
+
+                childTxn.setIntasendTransactionId(intasendTxnId);
+                childTxn.setStatus(mapIntasendTransactionStatusToTransactionStatus(txnStatusCode, txnStatus));
+                childTxn.setUpdatedAt(LocalDateTime.now());
+
+                TransactionMetaData childMetaData = TransactionMetaData.builder()
+                        .type("B2B_TILL_TRANSACTION_INITIATION_RESPONSE")
+                        .body(gson.toJson(intasendTxn))
+                        .createdAt(LocalDateTime.now())
+                        .transaction(childTxn)
+                        .build();
+
+                transactionDao.updateTransaction(childTxn);
+                transactionDao.createTransactionMetaData(childMetaData);
+
+                log.debug("Child B2B Till transaction {} mapped to Intasend transaction_id: {}, status: {}",
+                        childTxn.getTransactionRef(), intasendTxnId, childTxn.getStatus());
+            }
+        });
 
         log.info("B2B Till batch saved - Tracking ID: {}, Status: {}, Wallet Balance: {} (Available: {}), Child Transactions: {}", 
                 trackingId, batchTransaction.getStatus(), currentBalance, availableBalance, batchTransaction.getBatchTransactions().size());
@@ -1412,41 +1808,43 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                 .createdAt(LocalDateTime.now())
                 .transaction(batchTransaction)
                 .build();
-        
-        transactionDao.updateTransaction(batchTransaction);
-        transactionDao.createTransactionMetaData(batchMetaData);
 
-        for (int i = 0; i < batchTransaction.getBatchTransactions().size() && i < intasendTransactions.size(); i++) {
-            Transaction childTxn = batchTransaction.getBatchTransactions().get(i);
-            Map<String, Object> intasendTxn = intasendTransactions.get(i);
-            
-            String intasendTxnId = intasendTxn.get("transaction_id").toString();
-            String txnStatusCode = intasendTxn.get("status_code").toString();
-            String txnStatus = intasendTxn.get("status").toString();
-            
-            if (intasendTxn.containsKey("bank_code") && intasendTxn.get("bank_code") != null) {
-                childTxn.setSender("Bank Code: " + intasendTxn.get("bank_code").toString() + 
-                        " - Account: " + intasendTxn.get("account").toString());
+        transactionTemplate.executeWithoutResult(txStatus -> {
+            transactionDao.updateTransaction(batchTransaction);
+            transactionDao.createTransactionMetaData(batchMetaData);
+
+            for (int i = 0; i < batchTransaction.getBatchTransactions().size() && i < intasendTransactions.size(); i++) {
+                Transaction childTxn = batchTransaction.getBatchTransactions().get(i);
+                Map<String, Object> intasendTxn = intasendTransactions.get(i);
+
+                String intasendTxnId = intasendTxn.get("transaction_id").toString();
+                String txnStatusCode = intasendTxn.get("status_code").toString();
+                String txnStatus = intasendTxn.get("status").toString();
+
+                if (intasendTxn.containsKey("bank_code") && intasendTxn.get("bank_code") != null) {
+                    childTxn.setSender("Bank Code: " + intasendTxn.get("bank_code").toString() +
+                            " - Account: " + intasendTxn.get("account").toString());
+                }
+
+                childTxn.setIntasendTransactionId(intasendTxnId);
+                childTxn.setProvider(provider);
+                childTxn.setStatus(mapIntasendTransactionStatusToTransactionStatus(txnStatusCode, txnStatus));
+                childTxn.setUpdatedAt(LocalDateTime.now());
+
+                TransactionMetaData childMetaData = TransactionMetaData.builder()
+                        .type("BANK_PAYOUT_TRANSACTION_INITIATION_RESPONSE")
+                        .body(gson.toJson(intasendTxn))
+                        .createdAt(LocalDateTime.now())
+                        .transaction(childTxn)
+                        .build();
+
+                transactionDao.updateTransaction(childTxn);
+                transactionDao.createTransactionMetaData(childMetaData);
+
+                log.debug("Child Bank Payout transaction {} mapped to Intasend transaction_id: {}, status: {}",
+                        childTxn.getTransactionRef(), intasendTxnId, childTxn.getStatus());
             }
-            
-            childTxn.setIntasendTransactionId(intasendTxnId);
-            childTxn.setProvider(provider);
-            childTxn.setStatus(mapIntasendTransactionStatusToTransactionStatus(txnStatusCode, txnStatus));
-            childTxn.setUpdatedAt(LocalDateTime.now());
-            
-            TransactionMetaData childMetaData = TransactionMetaData.builder()
-                    .type("BANK_PAYOUT_TRANSACTION_INITIATION_RESPONSE")
-                    .body(gson.toJson(intasendTxn))
-                    .createdAt(LocalDateTime.now())
-                    .transaction(childTxn)
-                    .build();
-            
-            transactionDao.updateTransaction(childTxn);
-            transactionDao.createTransactionMetaData(childMetaData);
-            
-            log.debug("Child Bank Payout transaction {} mapped to Intasend transaction_id: {}, status: {}", 
-                    childTxn.getTransactionRef(), intasendTxnId, childTxn.getStatus());
-        }
+        });
 
         log.info("Bank Payout batch saved - Tracking ID: {}, Provider: {}, Status: {}, Wallet Balance: {} (Available: {}), Child Transactions: {}", 
                 trackingId, provider, batchTransaction.getStatus(), currentBalance, availableBalance, batchTransaction.getBatchTransactions().size());

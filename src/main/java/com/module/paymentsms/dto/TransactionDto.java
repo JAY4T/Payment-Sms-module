@@ -1,5 +1,6 @@
 package com.module.paymentsms.dto;
 
+import com.module.paymentsms.entity.TransactionMethod;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -14,13 +15,15 @@ import java.time.LocalDateTime;
 public class TransactionDto {
     private Long id;
     private String reference;
+    private String checkoutLink;
     private String provider;
     private String sender;
     private String currency;
     private String amount;
     private String fee;
-    private String method;
+    private TransactionMethod method;
     private String status;
+    private String clearingStatus;
     private String type;
     private String narration;
     private String notes;

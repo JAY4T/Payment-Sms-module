@@ -209,4 +209,29 @@ public class TransactionDaoImpl implements TransactionDao{
         entityManager.persist(transactionMetaData);
         return transactionMetaData;
     }
+
+    @Override
+    public List<Transaction> getPendingSendMoneyBatches() {
+        TypedQuery<Transaction> query = entityManager.createQuery(
+                "SELECT t FROM Transaction t WHERE t.hasBatch = true AND t.status IN ('PENDING', 'PROCESSING') AND t.intasendTrackingId IS NOT NULL",
+                Transaction.class);
+        return query.getResultList();
+    }
+
+    @Override
+    public List<Transaction> getPendingCollectionTransactions() {
+        TypedQuery<Transaction> query = entityManager.createQuery(
+                "SELECT t FROM Transaction t WHERE t.status IN ('PENDING', 'PROCESSING') AND t.invoiceId IS NOT NULL",
+                Transaction.class);
+        return query.getResultList();
+    }
+
+    @Override
+    public List<Transaction> getCollectionTransactionsPendingClearingStatus() {
+        TypedQuery<Transaction> query = entityManager.createQuery(
+                "SELECT t FROM Transaction t WHERE t.status = 'COMPLETED' AND t.invoiceId IS NOT NULL " +
+                        "AND (t.clearingStatus IS NULL OR t.clearingStatus <> 'AVAILABLE')",
+                Transaction.class);
+        return query.getResultList();
+    }
 }

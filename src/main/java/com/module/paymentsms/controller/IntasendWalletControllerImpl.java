@@ -63,7 +63,7 @@ public class IntasendWalletControllerImpl implements IntasendWalletController{
     public ResponseEntity<Object> getWalletById(@PathVariable Long id) {
         try {
             log.info("Retrieving wallet by ID: {}", id);
-            WalletDto wallet = intasendWalletService.getWalletById(id);
+            WalletDto wallet = intasendWalletService.syncWallet(id);
             return buildResponse.success(wallet, "Wallet retrieved successfully");
         } catch (Exception e) {
             log.error("Error retrieving wallet by ID {}: {}", id, e.getMessage(), e);
