@@ -96,7 +96,10 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
     @Override
     public TransactionDto checkout(IntasendCheckoutCreationDto intasendCheckoutCreationDto) throws Exception {
         LocalDateTime now = LocalDateTime.now();
-        String transactionRef = System.currentTimeMillis() + "_" + UUID.randomUUID() + "_MAG";
+        String callerReference = intasendCheckoutCreationDto.getReference();
+        String transactionRef = (callerReference != null && !callerReference.isBlank())
+                ? callerReference
+                : System.currentTimeMillis() + "_" + UUID.randomUUID() + "_MAG";
 
         TransactionMethod method = intasendCheckoutCreationDto.getMethod();
 
@@ -1065,6 +1068,10 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
             publishTransactionEvent(transaction, "transaction.completed");
         } else if ("FAILED".equals(transaction.getStatus())) {
             publishTransactionEvent(transaction, "transaction.failed");
+        } else if ("PROCESSING".equals(transaction.getStatus())) {
+            // Not terminal, but a caller (e.g. mledger) still needs to know a payment is
+            // genuinely in flight rather than assuming its own initial state forever.
+            publishTransactionEvent(transaction, "transaction.processing");
         }
 
         log.info("Callback processed for transaction {}: status={}", transaction.getTransactionRef(), transaction.getStatus());
