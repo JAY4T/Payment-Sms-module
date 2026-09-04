@@ -11,10 +11,10 @@ fi
 
 COMMIT_HASH=$1
 RELEASES_DIR="/home/pipeline/releases/paymentsms_dev"
-DEPLOY_BIN="/home/pipeline/production/paymentsms_dev/paymentsms"
-SERVICE_NAME="paymentsms_dev"
+DEPLOY_BIN="/home/pipeline/production/paymentsms_dev/paymentsms.jar"
+SERVICE_NAME="paymentsms_dev.service"
 BINARY_NAME="paymentsms-${COMMIT_HASH}.jar"
-declare -a PORTS=("7000" "7001")
+PORT="8010"
 
 # Check if the binary exists
 if [ ! -f "${RELEASES_DIR}/${BINARY_NAME}" ]; then
@@ -39,20 +39,15 @@ rollback_deployment() {
     echo "No previous binary to roll back to."
   fi
 
-  # wait to restart the services
   sleep 10
 
-  # Restart all services with the previous binary
-  for port in "${PORTS[@]}"; do
-    SERVICE="${SERVICE_NAME}@${port}.service"
-    echo "Restarting $SERVICE..."
-    sudo systemctl restart $SERVICE
-  done
+  echo "Restarting ${SERVICE_NAME}..."
+  sudo systemctl restart "${SERVICE_NAME}"
 
   echo "Rollback completed."
 }
 
-# Copy the binary to the deployment directory
+# Promote the binary
 echo "Promoting ${BINARY_NAME} to ${DEPLOY_BIN}..."
 ln -sf "${RELEASES_DIR}/${BINARY_NAME}" "${DEPLOY_BIN}"
 
@@ -63,7 +58,7 @@ health_check() {
   local port=$1
   local timeout=$HEALTH_CHECK_TIMEOUT
   echo "Performing health check on port ${port}..."
-  
+
   while [ $timeout -gt 0 ]; do
     if curl -f -s --connect-timeout 5 "http://localhost:${port}/actuator/health" >/dev/null 2>&1 || \
        curl -f -s --connect-timeout 5 "http://localhost:${port}/" >/dev/null 2>&1; then
@@ -74,56 +69,32 @@ health_check() {
     sleep 5
     timeout=$((timeout - 5))
   done
-  
+
   echo "❌ Health check failed for port ${port}"
   return 1
 }
 
-restart_service() {
-  local port=$1
-  local SERVICE="${SERVICE_NAME}@${port}.service"
-  echo "🔄 Rolling restart for ${SERVICE}..."
+echo "🔄 Restarting ${SERVICE_NAME}..."
+if ! sudo systemctl restart "${SERVICE_NAME}"; then
+  echo "❌ Error: Failed to restart ${SERVICE_NAME}. Rolling back deployment."
+  rollback_deployment
+  exit 1
+fi
 
-  # Restart the service
-  if ! sudo systemctl restart "$SERVICE"; then
-    echo "❌ Error: Failed to restart ${SERVICE}. Rolling back deployment."
-    rollback_deployment
-    exit 1
-  fi
+echo "⏳ Waiting for ${SERVICE_NAME} to initialize..."
+sleep $WAIT_TIME
 
-  # Wait a few seconds to allow the service to fully start
-  echo "⏳ Waiting for ${SERVICE} to initialize..."
-  sleep $WAIT_TIME
+if ! systemctl is-active --quiet "${SERVICE_NAME}"; then
+  echo "❌ Error: ${SERVICE_NAME} failed to start correctly. Rolling back deployment."
+  rollback_deployment
+  exit 1
+fi
 
-  # Check the status of the service
-  if ! systemctl is-active --quiet "${SERVICE}"; then
-    echo "❌ Error: ${SERVICE} failed to start correctly. Rolling back deployment."
-    rollback_deployment
-    exit 1
-  fi
+if ! health_check $PORT; then
+  echo "❌ Error: Health check failed for ${SERVICE_NAME}. Rolling back deployment."
+  rollback_deployment
+  exit 1
+fi
 
-  # Perform health check
-  if ! health_check $port; then
-    echo "❌ Error: Health check failed for ${SERVICE}. Rolling back deployment."
-    rollback_deployment
-    exit 1
-  fi
-
-  echo "✅ ${SERVICE} restarted and is healthy."
-}
-
-# Rolling deployment: restart services one by one to maintain availability
-echo "🚀 Starting rolling deployment..."
-for port in "${PORTS[@]}"; do
-  echo "📦 Deploying to port ${port}..."
-  restart_service $port
-  echo "✅ Port ${port} deployment complete."
-  
-  # Small delay between service restarts
-  if [ "${#PORTS[@]}" -gt 1 ]; then
-    echo "⏸️  Brief pause before next service..."
-    sleep 3
-  fi
-done
-
+echo "✅ ${SERVICE_NAME} restarted and is healthy."
 echo "Deployment completed successfully."
