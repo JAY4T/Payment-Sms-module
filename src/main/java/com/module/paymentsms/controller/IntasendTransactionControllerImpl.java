@@ -120,7 +120,10 @@ public class IntasendTransactionControllerImpl implements IntasendTransactionCon
     }
 
     @Override
-    @PostMapping("/webhook")
+    // IntaSend's own dashboard calls this "collection-webhook" for a Collection_Event
+    // subscription rather than the "webhook" path this was originally built with - both are
+    // accepted so an existing IntaSend webhook configuration doesn't need to be re-pointed.
+    @PostMapping({"/webhook", "/collection-webhook"})
     public ResponseEntity<Object> handleCallback(@RequestBody Map<String, Object> data) {
         try {
             log.info("Received transaction callback: {}", data);

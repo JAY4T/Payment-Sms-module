@@ -21,7 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-// Gate for every /api/** route except the two Intasend webhook callbacks (Intasend can't send
+// Gate for every /api/** route except the Intasend webhook callbacks (Intasend can't send
 // custom headers, so those stay open - see WEBHOOK_PATHS below). Two separate credential
 // schemes:
 //  - /api/v1/admin/** : a single static admin secret (ADMIN_API_KEY), since this is where API
@@ -35,6 +35,7 @@ public class ApiKeyAuthenticationFilter extends OncePerRequestFilter {
 
     private static final List<String> WEBHOOK_PATHS = List.of(
             "/api/v1/intasend/transaction/webhook",
+            "/api/v1/intasend/transaction/collection-webhook",
             "/api/v1/intasend/transaction/send-money-webhook"
     );
 
