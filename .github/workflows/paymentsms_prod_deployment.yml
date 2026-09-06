@@ -33,11 +33,11 @@ jobs:
 
       - name: Deploy Java JAR using SCP
         env:
-          USER: ${{ secrets.DROPLET_USER }}
-          HOST: ${{ secrets.DROPLET }}
+          USER: ${{ secrets.PROD_DROPLET_USER }}
+          HOST: ${{ secrets.PROD_DROPLET }}
           DIR: /home/pipeline/releases/paymentsms_prod
           JAR_PATH: ./target/paymentsms-0.0.1-SNAPSHOT.jar
-          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
         run: |
           mkdir -p ~/.ssh
           echo "$DEPLOY_SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
