@@ -33,6 +33,7 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<Object> handleUnreadableBody(HttpMessageNotReadableException e) {
         Throwable cause = e.getMostSpecificCause();
+        log.warn("DEBUG cause class: {}", cause == null ? "null" : cause.getClass().getName());
         if (cause instanceof InvalidFormatException invalidFormat && invalidFormat.getTargetType().isEnum()) {
             String field = invalidFormat.getPath().isEmpty()
                     ? "value"
