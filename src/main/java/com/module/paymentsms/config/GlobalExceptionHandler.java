@@ -1,6 +1,5 @@
 package com.module.paymentsms.config;
 
-import com.fasterxml.jackson.databind.exc.InvalidFormatException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -9,6 +8,7 @@ import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import tools.jackson.databind.exc.InvalidFormatException;
 
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -33,11 +33,10 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<Object> handleUnreadableBody(HttpMessageNotReadableException e) {
         Throwable cause = e.getMostSpecificCause();
-        log.warn("DEBUG cause class: {}", cause == null ? "null" : cause.getClass().getName());
         if (cause instanceof InvalidFormatException invalidFormat && invalidFormat.getTargetType().isEnum()) {
             String field = invalidFormat.getPath().isEmpty()
                     ? "value"
-                    : invalidFormat.getPath().get(invalidFormat.getPath().size() - 1).getFieldName();
+                    : invalidFormat.getPath().get(invalidFormat.getPath().size() - 1).getPropertyName();
             String invalidValue = String.valueOf(invalidFormat.getValue());
             String validValues = Arrays.stream(invalidFormat.getTargetType().getEnumConstants())
                     .map(String::valueOf)
