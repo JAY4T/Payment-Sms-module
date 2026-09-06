@@ -1,6 +1,7 @@
 package com.module.paymentsms.controller;
 
 import com.module.paymentsms.config.BuildResponse;
+import com.module.paymentsms.dto.IntasendBankPayoutDto;
 import com.module.paymentsms.dto.IntasendCheckoutCreationDto;
 import com.module.paymentsms.dto.IntasendMpesaBTBPaybillDto;
 import com.module.paymentsms.dto.TransactionDto;
@@ -53,6 +54,18 @@ public class IntasendTransactionControllerImpl implements IntasendTransactionCon
     }
 
     @Override
+    @PostMapping("/btb-bank-payout")
+    public ResponseEntity<Object> btbBankPayout(@RequestBody IntasendBankPayoutDto intasendBankPayoutDto) {
+        try {
+            TransactionDto transaction = intasendTransactionService.btbBankPayout(intasendBankPayoutDto);
+            return buildResponse.success(transaction, "Bank payout initiated successfully", null, HttpStatus.CREATED);
+        } catch (Exception e) {
+            log.error("Error initiating bank payout: {}", e.getMessage(), e);
+            return buildResponse.error("Bank payout failed: " + e.getMessage(), null, HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    @Override
     @GetMapping("/{id}")
     public ResponseEntity<Object> getTransactionById(@PathVariable Long id) {
         try {
@@ -83,11 +96,38 @@ public class IntasendTransactionControllerImpl implements IntasendTransactionCon
     }
 
     @Override
-    @PostMapping("/collection-webhook")
-    public ResponseEntity<Object> handleCollectionCallback(@RequestBody Map<String, Object> data) {
+    @PostMapping("/{id}/reconcile")
+    public ResponseEntity<Object> reconcileCollectionTransaction(@PathVariable Long id) {
+        try {
+            TransactionDto transaction = intasendTransactionService.reconcileCollectionTransaction(id);
+            return buildResponse.success(transaction, "Transaction reconciled successfully");
+        } catch (Exception e) {
+            log.error("Error reconciling transaction {}: {}", id, e.getMessage(), e);
+            return buildResponse.error("Failed to reconcile transaction: " + e.getMessage(), null, HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    @Override
+    @PostMapping("/{id}/reconcile-send-money")
+    public ResponseEntity<Object> reconcileSendMoneyTransaction(@PathVariable Long id) {
+        try {
+            TransactionDto transaction = intasendTransactionService.reconcileSendMoneyTransaction(id);
+            return buildResponse.success(transaction, "Send money transaction reconciled successfully");
+        } catch (Exception e) {
+            log.error("Error reconciling send money transaction {}: {}", id, e.getMessage(), e);
+            return buildResponse.error("Failed to reconcile send money transaction: " + e.getMessage(), null, HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    @Override
+    // IntaSend's own dashboard calls this "collection-webhook" for a Collection_Event
+    // subscription rather than the "webhook" path this was originally built with - both are
+    // accepted so an existing IntaSend webhook configuration doesn't need to be re-pointed.
+    @PostMapping({"/webhook", "/collection-webhook"})
+    public ResponseEntity<Object> handleCallback(@RequestBody Map<String, Object> data) {
         try {
             log.info("Received transaction callback: {}", data);
-            TransactionDto transaction = intasendTransactionService.handleCollectionCallback(data);
+            TransactionDto transaction = intasendTransactionService.handleCallback(data);
             if (transaction == null) {
                 return buildResponse.error("Failed to process callback", null, HttpStatus.OK);
             }
@@ -95,6 +135,22 @@ public class IntasendTransactionControllerImpl implements IntasendTransactionCon
         } catch (Exception e) {
             log.error("Error processing callback: {}", e.getMessage(), e);
             return buildResponse.error("Callback processing failed: " + e.getMessage(), null, HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    @Override
+    @PostMapping("/send-money-webhook")
+    public ResponseEntity<Object> handleSendMoneyCallback(@RequestBody Map<String, Object> data) {
+        try {
+            log.info("Received send money callback: {}", data);
+            TransactionDto transaction = intasendTransactionService.handleSendMoneyCallback(data);
+            if (transaction == null) {
+                return buildResponse.error("Failed to process callback", null, HttpStatus.OK);
+            }
+            return buildResponse.success(transaction, "Send money callback processed successfully");
+        } catch (Exception e) {
+            log.error("Error processing send money callback: {}", e.getMessage(), e);
+            return buildResponse.error("Send money callback processing failed: " + e.getMessage(), null, HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
 }

@@ -38,7 +38,8 @@ public class Transaction {
 
     private String sender;
 
-    private String method;
+    @Enumerated(EnumType.STRING)
+    private TransactionMethod method;
 
     private String type;
 
@@ -84,4 +85,10 @@ public class Transaction {
     @ManyToOne
     @JoinColumn(name = "wallet_id")
     private Wallet wallet;
+
+    @Column(name = "checkout_link")
+    private String checkoutLink;
+
+    @Column(name = "clearing_status")
+    private String clearingStatus;
 }

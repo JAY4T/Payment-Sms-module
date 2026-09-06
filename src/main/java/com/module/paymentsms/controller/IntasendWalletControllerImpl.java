@@ -63,10 +63,23 @@ public class IntasendWalletControllerImpl implements IntasendWalletController{
     public ResponseEntity<Object> getWalletById(@PathVariable Long id) {
         try {
             log.info("Retrieving wallet by ID: {}", id);
-            WalletDto wallet = intasendWalletService.getWalletById(id);
+            WalletDto wallet = intasendWalletService.syncWallet(id);
             return buildResponse.success(wallet, "Wallet retrieved successfully");
         } catch (Exception e) {
             log.error("Error retrieving wallet by ID {}: {}", id, e.getMessage(), e);
+            return buildResponse.error("Failed to retrieve wallet: " + e.getMessage(), null, HttpStatus.NOT_FOUND);
+        }
+    }
+
+    @Override
+    @GetMapping("/by-intasend-id/{intasendWalletId}")
+    public ResponseEntity<Object> getWalletByIntasendWalletId(@PathVariable String intasendWalletId) {
+        try {
+            log.info("Retrieving wallet by Intasend wallet ID: {}", intasendWalletId);
+            WalletDto wallet = intasendWalletService.getWalletByIntasendWalletId(intasendWalletId);
+            return buildResponse.success(wallet, "Wallet retrieved successfully");
+        } catch (Exception e) {
+            log.error("Error retrieving wallet by Intasend wallet ID {}: {}", intasendWalletId, e.getMessage(), e);
             return buildResponse.error("Failed to retrieve wallet: " + e.getMessage(), null, HttpStatus.NOT_FOUND);
         }
     }

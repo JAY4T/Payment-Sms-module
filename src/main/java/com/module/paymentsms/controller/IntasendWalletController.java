@@ -13,5 +13,6 @@ public interface IntasendWalletController {
     ResponseEntity<Object> createWallet(WalletCreationDto walletCreationDto);
     ResponseEntity<Object> updateWallet(WalletUpdateDto walletUpdateDto);
     ResponseEntity<Object> getWalletById(Long id);
+    ResponseEntity<Object> getWalletByIntasendWalletId(String intasendWalletId);
     ResponseEntity<Object> getAllWallets(String name, Boolean isSystemWallet, LocalDate createdAtStartDate, LocalDate createdAtEndDate, LocalDate updatedAtStartDate, LocalDate updatedAtEndDate, Integer page, Integer size);
 }

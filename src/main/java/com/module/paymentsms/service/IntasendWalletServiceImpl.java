@@ -104,6 +104,15 @@ public class IntasendWalletServiceImpl implements IntasendWalletService {
     }
 
     @Override
+    public WalletDto getWalletByIntasendWalletId(String intasendWalletId) {
+        Wallet wallet = walletDao.getWalletByIntasendWalletId(intasendWalletId);
+        if (wallet == null) {
+            throw new RuntimeException("Wallet not found with Intasend wallet ID: " + intasendWalletId);
+        }
+        return walletDtoMapper.toWalletDto(wallet);
+    }
+
+    @Override
     public PaginationDto<WalletDto> getAllWallets(String name, Boolean isSystemWallet, LocalDateTime createdAtStartDate, LocalDateTime createdAtEndDate, LocalDateTime updatedAtStartDate, LocalDateTime updatedAtEndDate, Integer page, Integer size) {
         try {
             // Create Pageable object
@@ -129,6 +138,61 @@ public class IntasendWalletServiceImpl implements IntasendWalletService {
         } catch (Exception e) {
             log.error("Failed to get wallets: {}", e.getMessage(), e);
             throw new RuntimeException("Failed to retrieve wallets", e);
+        }
+    }
+
+    @Transactional
+    @Override
+    public WalletDto syncWallet(Long id) {
+        Wallet wallet = walletDao.getWalletById(id);
+        if (wallet == null) {
+            throw new RuntimeException("Wallet not found with ID: " + id);
+        }
+
+        Map<String, Object> remoteWallet = fetchIntasendWallet(wallet.getIntasendWalletId());
+
+        wallet.setBalance(new BigDecimal(remoteWallet.get("current_balance").toString()));
+        wallet.setAvailableBalance(new BigDecimal(remoteWallet.get("available_balance").toString()));
+        wallet.setUpdatedAt(LocalDateTime.now());
+
+        return walletDtoMapper.toWalletDto(walletDao.updateWallet(wallet));
+    }
+
+    private Map<String, Object> fetchIntasendWallet(String intasendWalletId) {
+        Gson gson = new Gson();
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(new URI(walletUrl + "?record_id=" + intasendWalletId))
+                    .header("Accept", "application/json")
+                    .header("Authorization", "Bearer " + intasendSecretKey)
+                    .GET()
+                    .build();
+
+            HttpClient httpClient = HttpClient.newHttpClient();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() != HttpStatus.OK.value()) {
+                log.error("Failed to fetch Intasend wallet {}. Status: {}, Response: {}", intasendWalletId, response.statusCode(), response.body());
+                throw new RuntimeException("Failed to fetch Intasend wallet: Status " + response.statusCode());
+            }
+
+            Map<String, Object> responseMap = gson.fromJson(response.body(), Map.class);
+            List<Map<String, Object>> results = (List<Map<String, Object>>) responseMap.get("results");
+
+            if (results == null || results.isEmpty()) {
+                log.error("No wallet found on Intasend for record_id: {}", intasendWalletId);
+                throw new RuntimeException("Wallet not found on Intasend: " + intasendWalletId);
+            }
+
+            log.debug("Fetched Intasend wallet {}: {}", intasendWalletId, results.get(0));
+            return results.get(0);
+
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("Error fetching Intasend wallet {}: {}", intasendWalletId, e.getMessage(), e);
+            throw new RuntimeException("Failed to fetch Intasend wallet", e);
         }
     }
 

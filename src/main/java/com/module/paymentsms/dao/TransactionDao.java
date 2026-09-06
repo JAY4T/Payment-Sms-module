@@ -7,6 +7,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 public interface TransactionDao {
     Transaction createTransaction(Transaction transaction);
@@ -15,6 +16,9 @@ public interface TransactionDao {
     Transaction getTransactionByReference(String reference);
     Transaction getTransactionByIntasendTrackingId(String trackingId);
     Page<Transaction> getAllTransactions(Long walletId, String provider, String sender, String method, String type, String status, LocalDateTime createdAtStartDate, LocalDateTime createdAtEndDate, LocalDateTime updatedAtStartDate, LocalDateTime updatedAtEndDate, Pageable pageable);
+    List<Transaction> getPendingSendMoneyBatches();
+    List<Transaction> getPendingCollectionTransactions();
+    List<Transaction> getCollectionTransactionsPendingClearingStatus();
 
     TransactionCallback createTransactionCallback(TransactionCallback transactionCallback);
     Page<TransactionCallback> getAllTransactionCallbacks(Long transactionId, LocalDateTime createdAtStartDate, LocalDateTime createdAtEndDate, Pageable pageable);
