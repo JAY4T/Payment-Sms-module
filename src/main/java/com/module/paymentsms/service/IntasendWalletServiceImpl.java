@@ -104,6 +104,15 @@ public class IntasendWalletServiceImpl implements IntasendWalletService {
     }
 
     @Override
+    public WalletDto getWalletByIntasendWalletId(String intasendWalletId) {
+        Wallet wallet = walletDao.getWalletByIntasendWalletId(intasendWalletId);
+        if (wallet == null) {
+            throw new RuntimeException("Wallet not found with Intasend wallet ID: " + intasendWalletId);
+        }
+        return walletDtoMapper.toWalletDto(wallet);
+    }
+
+    @Override
     public PaginationDto<WalletDto> getAllWallets(String name, Boolean isSystemWallet, LocalDateTime createdAtStartDate, LocalDateTime createdAtEndDate, LocalDateTime updatedAtStartDate, LocalDateTime updatedAtEndDate, Integer page, Integer size) {
         try {
             // Create Pageable object
