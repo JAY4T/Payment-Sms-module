@@ -26,6 +26,7 @@ public class SecurityConfig {
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers(
                         "/api/v1/intasend/transaction/webhook",
+                        "/api/v1/intasend/transaction/collection-webhook",
                         "/api/v1/intasend/transaction/send-money-webhook"
                 ).permitAll()
                 .requestMatchers("/actuator/**").permitAll()
