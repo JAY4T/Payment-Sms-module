@@ -2,6 +2,7 @@ package com.module.paymentsms.service;
 
 import com.google.gson.Gson;
 import com.module.paymentsms.dao.SmsMessageDao;
+import com.module.paymentsms.dto.CelcomSenderDto;
 import com.module.paymentsms.dto.PaginationDto;
 import com.module.paymentsms.dto.SmsCreationDto;
 import com.module.paymentsms.dto.SmsMessageDto;
@@ -32,20 +33,20 @@ import java.util.stream.Collectors;
 public class CelcomSmsMessageServiceImpl implements CelcomSmsMessageService {
     private final SmsMessageDao smsMessageDao;
     private final SmsMessageDtoMapper smsMessageDtoMapper;
+    private final CelcomSenderService celcomSenderService;
 
     @Value("${celcom.sms.url}")
     private String celcomSmsUrl;
 
-    @Value("${celcom.api.key}")
-    private String celcomApiKey;
-
     @Autowired
     public CelcomSmsMessageServiceImpl(
             SmsMessageDao smsMessageDao,
-            SmsMessageDtoMapper smsMessageDtoMapper
+            SmsMessageDtoMapper smsMessageDtoMapper,
+            CelcomSenderService celcomSenderService
     ) {
         this.smsMessageDao = smsMessageDao;
         this.smsMessageDtoMapper = smsMessageDtoMapper;
+        this.celcomSenderService = celcomSenderService;
     }
 
     @Override
@@ -125,13 +126,17 @@ public class CelcomSmsMessageServiceImpl implements CelcomSmsMessageService {
     }
 
     private void sendToCelcomApi(SmsMessage smsMessage) throws Exception {
+        // Each shortcode (sender) has its own Celcom partner ID + API key, registered via
+        // POST /api/v1/admin/celcom-senders - throws if this sender isn't configured.
+        CelcomSenderDto celcomSender = celcomSenderService.getActiveCredentialsForShortcode(smsMessage.getSender());
+
         // Prepare request body
         Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("partnerID", "954");
+        requestBody.put("partnerID", celcomSender.getPartnerId());
         requestBody.put("shortcode", smsMessage.getSender());
         requestBody.put("message", smsMessage.getMessage());
         requestBody.put("mobile", smsMessage.getRecipient());
-        requestBody.put("apikey", celcomApiKey);
+        requestBody.put("apikey", celcomSender.getApiKey());
         requestBody.put("pass_type", "plain");
 
         Gson gson = new Gson();
