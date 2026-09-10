@@ -1,0 +1,47 @@
+meta {
+  name: Create Celcom Sender
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{base_url}}/admin/celcom-senders
+  body: json
+  auth: none
+}
+
+headers {
+  X-Admin-Secret: {{admin_secret}}
+}
+
+body:json {
+  {
+    "shortcode": "LigiOpen",
+    "apiKey": "<Celcom-issued API key for this shortcode>"
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}
+
+docs {
+  ## Create Celcom Sender
+
+  Bruno: `admin/Create Celcom Sender`
+
+  Registers a Celcom shortcode (e.g. `LigiOpen`, `KaaKazini`) with its own API key. Every SMS
+  send request's `sender` field (see `sms/Send SMS`) must match a shortcode registered here -
+  `sms/send` looks up credentials by that exact value and fails with a clear error if none are
+  active for it.
+
+  - `partnerId` is optional and defaults to `"954"` (every shortcode registered so far shares
+    this Celcom partner ID) - only pass it if Celcom assigns a different one to a new shortcode.
+  - `shortcode` must be unique; creating a duplicate is rejected.
+  - `apiKey` is stored in plaintext (unlike `api-clients`' `apiSecret`, this is a credential we
+    use to call Celcom, not one used to authenticate callers to us, so it can't be hashed) and is
+    returned as-is on every read here - this endpoint is already gated by `X-Admin-Secret`.
+
+  Code source: `CelcomSenderControllerImpl.createCelcomSender` / `CelcomSenderServiceImpl.createCelcomSender`.
+}

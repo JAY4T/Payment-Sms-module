@@ -1,0 +1,31 @@
+meta {
+  name: List Celcom Senders
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{base_url}}/admin/celcom-senders
+  body: none
+  auth: none
+}
+
+headers {
+  X-Admin-Secret: {{admin_secret}}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}
+
+docs {
+  ## List Celcom Senders
+
+  Bruno: `admin/List Celcom Senders`
+
+  Lists every registered Celcom shortcode (active and revoked), including its current `apiKey`
+  and `partnerId` in plaintext.
+
+  Code source: `CelcomSenderControllerImpl.getAllCelcomSenders` / `CelcomSenderServiceImpl.getAllCelcomSenders`.
+}

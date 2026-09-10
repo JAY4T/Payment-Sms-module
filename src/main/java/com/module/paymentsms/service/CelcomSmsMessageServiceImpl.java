@@ -2,6 +2,7 @@ package com.module.paymentsms.service;
 
 import com.google.gson.Gson;
 import com.module.paymentsms.dao.SmsMessageDao;
+import com.module.paymentsms.dto.CelcomSenderDto;
 import com.module.paymentsms.dto.PaginationDto;
 import com.module.paymentsms.dto.SmsCreationDto;
 import com.module.paymentsms.dto.SmsMessageDto;
@@ -32,20 +33,20 @@ import java.util.stream.Collectors;
 public class CelcomSmsMessageServiceImpl implements CelcomSmsMessageService {
     private final SmsMessageDao smsMessageDao;
     private final SmsMessageDtoMapper smsMessageDtoMapper;
+    private final CelcomSenderService celcomSenderService;
 
     @Value("${celcom.sms.url}")
     private String celcomSmsUrl;
 
-    @Value("${celcom.api.key}")
-    private String celcomApiKey;
-
     @Autowired
     public CelcomSmsMessageServiceImpl(
             SmsMessageDao smsMessageDao,
-            SmsMessageDtoMapper smsMessageDtoMapper
+            SmsMessageDtoMapper smsMessageDtoMapper,
+            CelcomSenderService celcomSenderService
     ) {
         this.smsMessageDao = smsMessageDao;
         this.smsMessageDtoMapper = smsMessageDtoMapper;
+        this.celcomSenderService = celcomSenderService;
     }
 
     @Override
@@ -125,13 +126,17 @@ public class CelcomSmsMessageServiceImpl implements CelcomSmsMessageService {
     }
 
     private void sendToCelcomApi(SmsMessage smsMessage) throws Exception {
+        // Each shortcode (sender) has its own Celcom partner ID + API key, registered via
+        // POST /api/v1/admin/celcom-senders - throws if this sender isn't configured.
+        CelcomSenderDto celcomSender = celcomSenderService.getActiveCredentialsForShortcode(smsMessage.getSender());
+
         // Prepare request body
         Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("partnerID", "954");
+        requestBody.put("partnerID", celcomSender.getPartnerId());
         requestBody.put("shortcode", smsMessage.getSender());
         requestBody.put("message", smsMessage.getMessage());
         requestBody.put("mobile", smsMessage.getRecipient());
-        requestBody.put("apikey", celcomApiKey);
+        requestBody.put("apikey", celcomSender.getApiKey());
         requestBody.put("pass_type", "plain");
 
         Gson gson = new Gson();
@@ -153,8 +158,12 @@ public class CelcomSmsMessageServiceImpl implements CelcomSmsMessageService {
         log.debug("Celcom API response status: {}, body: {}", response.statusCode(), response.body());
 
         if (response.statusCode() != HttpStatus.OK.value()) {
-            log.error("Failed to send SMS. Status: {}, Response: {}", response.statusCode(), response.body());
-            throw new Exception("Failed to send SMS: Status " + response.statusCode());
+            String detail = extractCelcomError(response.body());
+            log.error("Celcom rejected SMS. Status: {}, Response: {}", response.statusCode(), response.body());
+            smsMessage.setStatus("NOT_DELIVERED");
+            smsMessage.setFailureReason(detail);
+            smsMessage.setUpdatedAt(LocalDateTime.now());
+            throw new Exception(detail);
         }
 
         // Parse response
@@ -207,5 +216,52 @@ public class CelcomSmsMessageServiceImpl implements CelcomSmsMessageService {
         } else {
             throw new Exception("Invalid response format from Celcom API");
         }
+    }
+
+    // Celcom's non-2xx errors look like:
+    //   {"response-code":1003,"response-description":"Validation Errors...",
+    //    "errors":{"shortcode":{"Shortcode":"Sender ID is inactive or unassigned"}}}
+    // Pull the human-readable bits out so the caller sees the actual reason, not just a status code.
+    @SuppressWarnings("unchecked")
+    private String extractCelcomError(String body) {
+        try {
+            Map<String, Object> parsed = new Gson().fromJson(body, Map.class);
+            if (parsed != null) {
+                StringBuilder sb = new StringBuilder();
+                Object desc = parsed.get("response-description");
+                if (desc != null) {
+                    sb.append(desc);
+                }
+                Object errors = parsed.get("errors");
+                if (errors instanceof Map) {
+                    String flat = flattenErrorValues((Map<String, Object>) errors);
+                    if (!flat.isEmpty()) {
+                        sb.append(sb.length() > 0 ? " - " : "").append(flat);
+                    }
+                }
+                if (sb.length() > 0) {
+                    return sb.toString();
+                }
+            }
+        } catch (Exception ignored) {
+            // not JSON, or an unexpected shape - fall back to the raw body
+        }
+        return "Celcom API returned an error: " + body;
+    }
+
+    @SuppressWarnings("unchecked")
+    private String flattenErrorValues(Map<String, Object> errors) {
+        List<String> parts = new java.util.ArrayList<>();
+        for (Object value : errors.values()) {
+            if (value instanceof Map) {
+                String nested = flattenErrorValues((Map<String, Object>) value);
+                if (!nested.isEmpty()) {
+                    parts.add(nested);
+                }
+            } else if (value != null) {
+                parts.add(value.toString());
+            }
+        }
+        return String.join("; ", parts);
     }
 }

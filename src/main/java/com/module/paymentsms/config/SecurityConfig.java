@@ -30,6 +30,12 @@ public class SecurityConfig {
                         "/api/v1/intasend/transaction/send-money-webhook"
                 ).permitAll()
                 .requestMatchers("/actuator/**").permitAll()
+                // Spring's DefaultHandlerExceptionResolver resolves MVC exceptions (e.g. a bad
+                // enum value in a @RequestBody) via response.sendError(...), which Tomcat handles
+                // by internally forwarding to /error. Without this permit, that forward hits
+                // .anyRequest().authenticated() below and gets rejected as unauthenticated - so a
+                // request that should have gotten a clean 400 instead silently got an empty 403.
+                .requestMatchers("/error").permitAll()
                 .requestMatchers("/api/**").authenticated()
                 .anyRequest().authenticated()
             )

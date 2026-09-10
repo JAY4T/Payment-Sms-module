@@ -1,0 +1,33 @@
+meta {
+  name: List API Clients
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{base_url}}/admin/api-clients
+  body: none
+  auth: none
+}
+
+headers {
+  X-Admin-Secret: {{admin_secret}}
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}
+
+docs {
+  ## List API Clients
+  
+  Bruno: `admin/List API Clients`
+  
+  Lists every API client (active and revoked). `apiSecret` is always `null` here — it's only
+  ever returned once, on `Create API Client`'s response. `lastUsedAt` updates on every
+  successful authenticated request from that client, so this doubles as a quick way to check
+  whether a given integration is actually calling in.
+  
+  Code source: `ApiClientControllerImpl.getAllApiClients` / `ApiClientServiceImpl.getAllApiClients`.
+}
