@@ -78,4 +78,16 @@ public class CelcomSenderControllerImpl implements CelcomSenderController {
             return buildResponse.error("Failed to revoke Celcom sender: " + e.getMessage(), null, HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
+
+    @Override
+    @PostMapping("/{id}/activate")
+    public ResponseEntity<Object> activateCelcomSender(@PathVariable Long id) {
+        try {
+            CelcomSenderDto celcomSender = celcomSenderService.activateCelcomSender(id);
+            return buildResponse.success(celcomSender, "Celcom sender activated successfully");
+        } catch (Exception e) {
+            log.error("Error activating Celcom sender {}: {}", id, e.getMessage(), e);
+            return buildResponse.error("Failed to activate Celcom sender: " + e.getMessage(), null, HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
 }

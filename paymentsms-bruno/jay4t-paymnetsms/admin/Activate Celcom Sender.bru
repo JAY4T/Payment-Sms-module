@@ -1,0 +1,36 @@
+meta {
+  name: Activate Celcom Sender
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{base_url}}/admin/celcom-senders/:id/activate
+  body: none
+  auth: none
+}
+
+headers {
+  X-Admin-Secret: {{admin_secret}}
+}
+
+params:path {
+  id: 1
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}
+
+docs {
+  ## Activate Celcom Sender
+
+  Bruno: `admin/Activate Celcom Sender`
+
+  Reverses `admin/Revoke Celcom Sender` - sets `active: true` again on the shortcode, keeping
+  its existing `id`/`apiKey`/`partnerId`. `sms/send` requests for that `sender` start
+  succeeding again immediately.
+
+  Code source: `CelcomSenderControllerImpl.activateCelcomSender` / `CelcomSenderServiceImpl.activateCelcomSender`.
+}

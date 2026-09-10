@@ -9,4 +9,5 @@ public interface CelcomSenderController {
     ResponseEntity<Object> getAllCelcomSenders();
     ResponseEntity<Object> updateCelcomSender(Long id, CelcomSenderUpdateDto celcomSenderUpdateDto);
     ResponseEntity<Object> revokeCelcomSender(Long id);
+    ResponseEntity<Object> activateCelcomSender(Long id);
 }

@@ -1,0 +1,51 @@
+meta {
+  name: Create API Client
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{base_url}}/admin/api-clients
+  body: json
+  auth: none
+}
+
+headers {
+  X-Admin-Secret: {{admin_secret}}
+}
+
+body:json {
+  {
+    "name": "Example Partner System",
+    "description": "Issued for <system name> to call kiwipay's payment APIs"
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}
+
+docs {
+  ## Create API Client
+  
+  Bruno: `admin/Create API Client`
+  
+  Issues a new `X-Api-Key` / `X-Api-Secret` pair for an external system to call kiwipay's API.
+  Every route under `/api/**` requires this pair except the two Intasend webhook callbacks
+  (`intasend-transaction/Webhook (Callback)`, `intasend-transaction/Send Money Webhook
+  (Callback)`), which stay open since Intasend can't send custom headers.
+  
+  - **This is the only endpoint here protected by a different mechanism** — `X-Admin-Secret`
+    (set the `admin_secret` environment variable to the server's `ADMIN_API_KEY`), not
+    `X-Api-Key`/`X-Api-Secret`. That's deliberate: there's no API client yet to authenticate the
+    request that creates the first one, so client management needs its own, separate credential.
+  - The response's `apiSecret` is shown **once**, in plaintext, only on this create call — it's
+    stored hashed (`BCrypt`) server-side and cannot be retrieved again. Copy it immediately into
+    the `api_key`/`api_secret` environment variables (used by every other folder's inherited
+    headers) or wherever the consuming system stores its credentials. If it's lost, revoke this
+    client and create a new one.
+  - `apiKey` is safe to log/display (e.g. `kp_xxxxx`); `apiSecret` is not.
+  
+  Code source: `ApiClientControllerImpl.createApiClient` / `ApiClientServiceImpl.createApiClient`.
+}

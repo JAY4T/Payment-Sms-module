@@ -10,6 +10,7 @@ public interface CelcomSenderService {
     CelcomSenderDto createCelcomSender(CelcomSenderCreationDto celcomSenderCreationDto);
     CelcomSenderDto updateCelcomSender(CelcomSenderUpdateDto celcomSenderUpdateDto);
     CelcomSenderDto revokeCelcomSender(Long id);
+    CelcomSenderDto activateCelcomSender(Long id);
     List<CelcomSenderDto> getAllCelcomSenders();
 
     // Used by CelcomSmsMessageServiceImpl to resolve which credentials to send a given

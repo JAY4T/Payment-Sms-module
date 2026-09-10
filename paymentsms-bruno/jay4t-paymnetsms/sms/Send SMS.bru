@@ -13,7 +13,7 @@ post {
 body:json {
   {
     "sender": "LigiOpen",
-    "recipient": "0794649026",
+    "recipient": "0753031632",
     "service": "LIGIOPEN",
     "message": "Don't miss the big match! [Team A] takes on [Team B] this Saturday at 4:00 PM. Venue: [City Stadium]. Get your tickets now: https://ligiopen.com/tickets. See you there!"
   }
@@ -22,4 +22,15 @@ body:json {
 settings {
   encodeUrl: true
   timeout: 0
+}
+
+docs {
+  ## Send SMS
+
+  Bruno: `sms/Send SMS`
+
+  `sender` must exactly match a shortcode registered via `admin/Create Celcom Sender` - each
+  shortcode (`LigiOpen`, `KaaKazini`, etc.) has its own Celcom API key, looked up by this field.
+  Sending with an unregistered or revoked `sender` fails with a clear error naming it instead of
+  going out.
 }

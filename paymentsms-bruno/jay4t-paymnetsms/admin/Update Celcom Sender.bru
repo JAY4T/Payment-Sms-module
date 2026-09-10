@@ -1,0 +1,43 @@
+meta {
+  name: Update Celcom Sender
+  type: http
+  seq: 6
+}
+
+put {
+  url: {{base_url}}/admin/celcom-senders/:id
+  body: json
+  auth: none
+}
+
+params:path {
+  id: 1
+}
+
+headers {
+  X-Admin-Secret: {{admin_secret}}
+}
+
+body:json {
+  {
+    "apiKey": "<rotated Celcom API key>",
+    "partnerId": "<Celcom partner ID, only if it also changed>"
+  }
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}
+
+docs {
+  ## Update Celcom Sender
+  
+  Bruno: `admin/Update Celcom Sender`
+  
+  Rotates `apiKey` and/or `partnerId` on an existing shortcode - both fields are optional and
+  only overwrite what's provided (omit `partnerId` to leave it as-is). The shortcode itself
+  can't be changed; register a new one instead if a shortcode changes.
+  
+  Code source: `CelcomSenderControllerImpl.updateCelcomSender` / `CelcomSenderServiceImpl.updateCelcomSender`.
+}

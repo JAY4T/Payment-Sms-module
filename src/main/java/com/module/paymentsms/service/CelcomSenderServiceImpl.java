@@ -101,6 +101,23 @@ public class CelcomSenderServiceImpl implements CelcomSenderService {
     }
 
     @Override
+    @Transactional
+    public CelcomSenderDto activateCelcomSender(Long id) {
+        CelcomSender celcomSender = celcomSenderDao.getCelcomSenderById(id);
+        if (celcomSender == null) {
+            throw new RuntimeException("Celcom sender not found with ID: " + id);
+        }
+
+        celcomSender.setActive(true);
+        celcomSender.setUpdatedAt(LocalDateTime.now());
+        celcomSenderDao.updateCelcomSender(celcomSender);
+
+        log.info("Activated Celcom sender '{}' (id={})", celcomSender.getShortcode(), id);
+
+        return celcomSenderDtoMapper.toCelcomSenderDto(celcomSender);
+    }
+
+    @Override
     public List<CelcomSenderDto> getAllCelcomSenders() {
         return celcomSenderDao.getAllCelcomSenders().stream()
                 .map(celcomSenderDtoMapper::toCelcomSenderDto)

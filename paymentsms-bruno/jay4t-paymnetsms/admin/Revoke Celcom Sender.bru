@@ -1,0 +1,36 @@
+meta {
+  name: Revoke Celcom Sender
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{base_url}}/admin/celcom-senders/:id/revoke
+  body: none
+  auth: none
+}
+
+headers {
+  X-Admin-Secret: {{admin_secret}}
+}
+
+params:path {
+  id: 1
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}
+
+docs {
+  ## Revoke Celcom Sender
+
+  Bruno: `admin/Revoke Celcom Sender`
+
+  Sets `active: false` on the shortcode - `sms/send` requests for that `sender` immediately
+  start failing with "No active Celcom credentials configured for sender '...'" instead of
+  going out. Reverse with `admin/Activate Celcom Sender`.
+
+  Code source: `CelcomSenderControllerImpl.revokeCelcomSender` / `CelcomSenderServiceImpl.revokeCelcomSender`.
+}

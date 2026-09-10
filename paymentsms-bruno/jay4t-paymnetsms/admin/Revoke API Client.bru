@@ -1,0 +1,36 @@
+meta {
+  name: Revoke API Client
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{base_url}}/admin/api-clients/:id/revoke
+  body: none
+  auth: none
+}
+
+headers {
+  X-Admin-Secret: {{admin_secret}}
+}
+
+params:path {
+  id: 1
+}
+
+settings {
+  encodeUrl: true
+  timeout: 0
+}
+
+docs {
+  ## Revoke API Client
+  
+  Bruno: `admin/Revoke API Client`
+  
+  Sets `active: false` on the client — its `apiKey`/`apiSecret` immediately stop working for
+  every other endpoint (`ApiClientServiceImpl.validateCredentials` checks `active` before
+  checking the secret). There's no un-revoke; issue a new client instead.
+  
+  Code source: `ApiClientControllerImpl.revokeApiClient` / `ApiClientServiceImpl.revokeApiClient`.
+}
