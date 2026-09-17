@@ -1,12 +1,18 @@
 package com.module.paymentsms.service;
 
 import com.google.gson.Gson;
+import com.module.paymentsms.dao.TransactionDao;
 import com.module.paymentsms.dao.WalletDao;
 import com.module.paymentsms.dto.PaginationDto;
+import com.module.paymentsms.dto.TransactionDto;
 import com.module.paymentsms.dto.WalletCreationDto;
 import com.module.paymentsms.dto.WalletDto;
+import com.module.paymentsms.dto.WalletTransferRequestDto;
 import com.module.paymentsms.dto.WalletUpdateDto;
+import com.module.paymentsms.entity.Transaction;
+import com.module.paymentsms.entity.TransactionMethod;
 import com.module.paymentsms.entity.Wallet;
+import com.module.paymentsms.mapper.TransactionDtoMapper;
 import com.module.paymentsms.mapper.WalletDtoMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,6 +30,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +42,8 @@ import java.util.stream.Collectors;
 public class IntasendWalletServiceImpl implements IntasendWalletService {
     private final WalletDao walletDao;
     private final WalletDtoMapper walletDtoMapper;
+    private final TransactionDao transactionDao;
+    private final TransactionDtoMapper transactionDtoMapper;
 
     @Value("${intasend.secret.key}")
     private String intasendSecretKey;
@@ -48,10 +57,14 @@ public class IntasendWalletServiceImpl implements IntasendWalletService {
     @Autowired
     public IntasendWalletServiceImpl(
             WalletDao walletDao,
-            WalletDtoMapper walletDtoMapper
+            WalletDtoMapper walletDtoMapper,
+            TransactionDao transactionDao,
+            TransactionDtoMapper transactionDtoMapper
     ) {
         this.walletDao = walletDao;
         this.walletDtoMapper = walletDtoMapper;
+        this.transactionDao = transactionDao;
+        this.transactionDtoMapper = transactionDtoMapper;
     }
 
     @Transactional
@@ -156,6 +169,103 @@ public class IntasendWalletServiceImpl implements IntasendWalletService {
         wallet.setUpdatedAt(LocalDateTime.now());
 
         return walletDtoMapper.toWalletDto(walletDao.updateWallet(wallet));
+    }
+
+    @Transactional
+    @Override
+    public TransactionDto transferBetweenWallets(String fromIntasendWalletId, WalletTransferRequestDto request) {
+        Wallet fromWallet = walletDao.getWalletByIntasendWalletId(fromIntasendWalletId);
+        if (fromWallet == null) {
+            throw new RuntimeException("Wallet not found with Intasend wallet ID: " + fromIntasendWalletId);
+        }
+        // Destination must also be a wallet this service already knows about - an unrecognized
+        // Intasend wallet id here is almost certainly a caller-side mistake (wrong id, wrong
+        // environment), not a wallet Intasend would actually accept as a valid transfer target.
+        Wallet toWallet = walletDao.getWalletByIntasendWalletId(request.getToIntasendWalletId());
+        if (toWallet == null) {
+            throw new RuntimeException("Wallet not found with Intasend wallet ID: " + request.getToIntasendWalletId());
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        Transaction transaction = Transaction.builder()
+                .transactionRef("TRANSFER_" + UUID.randomUUID())
+                .sender(fromWallet.getName())
+                .method(TransactionMethod.INTASEND_WALLET_TRANSFER)
+                .type("DEBIT")
+                .currency("KES")
+                .amount(request.getAmount())
+                .status("PENDING")
+                .narration(request.getNarrative())
+                .createdAt(now)
+                .updatedAt(now)
+                .callbacks(new ArrayList<>())
+                .wallet(fromWallet)
+                .build();
+        transaction = transactionDao.createTransaction(transaction);
+
+        try {
+            Map<String, Object> result = callIntraTransfer(fromIntasendWalletId, request);
+
+            fromWallet.setBalance(new BigDecimal(result.get("current_balance").toString()));
+            fromWallet.setAvailableBalance(new BigDecimal(result.get("available_balance").toString()));
+            fromWallet.setUpdatedAt(now);
+            walletDao.updateWallet(fromWallet);
+
+            transaction.setStatus("COMPLETED");
+            transaction.setUpdatedAt(LocalDateTime.now());
+            transaction = transactionDao.updateTransaction(transaction);
+
+            return transactionDtoMapper.toTransactionDto(transaction);
+        } catch (Exception e) {
+            transaction.setStatus("FAILED");
+            transaction.setFailureReason(e.getMessage());
+            transaction.setUpdatedAt(LocalDateTime.now());
+            transactionDao.updateTransaction(transaction);
+            log.error("Wallet transfer failed: from={} to={} amount={}: {}",
+                    fromIntasendWalletId, request.getToIntasendWalletId(), request.getAmount(), e.getMessage(), e);
+            throw new RuntimeException("Failed to transfer between wallets: " + e.getMessage(), e);
+        }
+    }
+
+    private Map<String, Object> callIntraTransfer(String fromIntasendWalletId, WalletTransferRequestDto request) {
+        Gson gson = new Gson();
+        String base = walletUrl.endsWith("/") ? walletUrl.substring(0, walletUrl.length() - 1) : walletUrl;
+        String transferUrl = base + "/" + fromIntasendWalletId + "/intra_transfer/";
+
+        Map<String, Object> requestBody = Map.of(
+                "wallet_id", request.getToIntasendWalletId(),
+                "amount", request.getAmount().toPlainString(),
+                "narrative", request.getNarrative()
+        );
+
+        try {
+            HttpRequest httpRequest = HttpRequest.newBuilder()
+                    .uri(new URI(transferUrl))
+                    .header("Accept", "application/json")
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", "Bearer " + intasendSecretKey)
+                    .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(requestBody)))
+                    .build();
+
+            HttpClient httpClient = HttpClient.newHttpClient();
+            HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() != HttpStatus.OK.value() && response.statusCode() != HttpStatus.CREATED.value()) {
+                log.error("Failed to transfer between Intasend wallets. Status: {}, Response: {}", response.statusCode(), response.body());
+                throw new RuntimeException("Intasend intra_transfer failed: Status " + response.statusCode() + " - " + response.body());
+            }
+
+            Map<String, Object> responseMap = gson.fromJson(response.body(), Map.class);
+            if (responseMap.get("current_balance") == null || responseMap.get("available_balance") == null) {
+                log.error("Unexpected Intasend intra_transfer response, missing balance fields: {}", response.body());
+                throw new RuntimeException("Intasend intra_transfer response missing balance fields");
+            }
+            return responseMap;
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to call Intasend intra_transfer", e);
+        }
     }
 
     private Map<String, Object> fetchIntasendWallet(String intasendWalletId) {
