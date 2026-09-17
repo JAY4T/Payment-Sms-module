@@ -2,8 +2,10 @@ package com.module.paymentsms.controller;
 
 import com.module.paymentsms.config.BuildResponse;
 import com.module.paymentsms.dto.PaginationDto;
+import com.module.paymentsms.dto.TransactionDto;
 import com.module.paymentsms.dto.WalletCreationDto;
 import com.module.paymentsms.dto.WalletDto;
+import com.module.paymentsms.dto.WalletTransferRequestDto;
 import com.module.paymentsms.dto.WalletUpdateDto;
 import com.module.paymentsms.service.IntasendWalletService;
 import lombok.extern.slf4j.Slf4j;
@@ -68,6 +70,19 @@ public class IntasendWalletControllerImpl implements IntasendWalletController{
         } catch (Exception e) {
             log.error("Error retrieving wallet by ID {}: {}", id, e.getMessage(), e);
             return buildResponse.error("Failed to retrieve wallet: " + e.getMessage(), null, HttpStatus.NOT_FOUND);
+        }
+    }
+
+    @Override
+    @PostMapping("/{fromIntasendWalletId}/transfer")
+    public ResponseEntity<Object> transferBetweenWallets(@PathVariable String fromIntasendWalletId, @RequestBody WalletTransferRequestDto request) {
+        try {
+            log.info("Transferring {} from wallet {} to wallet {}", request.getAmount(), fromIntasendWalletId, request.getToIntasendWalletId());
+            TransactionDto transaction = intasendWalletService.transferBetweenWallets(fromIntasendWalletId, request);
+            return buildResponse.success(transaction, "Wallet transfer completed successfully", null, HttpStatus.CREATED);
+        } catch (Exception e) {
+            log.error("Error transferring from wallet {} to wallet {}: {}", fromIntasendWalletId, request.getToIntasendWalletId(), e.getMessage(), e);
+            return buildResponse.error("Failed to transfer between wallets: " + e.getMessage(), null, HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
 

@@ -3,6 +3,7 @@ package com.module.paymentsms.controller;
 import com.module.paymentsms.dto.PaginationDto;
 import com.module.paymentsms.dto.WalletCreationDto;
 import com.module.paymentsms.dto.WalletDto;
+import com.module.paymentsms.dto.WalletTransferRequestDto;
 import com.module.paymentsms.dto.WalletUpdateDto;
 import org.springframework.http.ResponseEntity;
 
@@ -15,4 +16,5 @@ public interface IntasendWalletController {
     ResponseEntity<Object> getWalletById(Long id);
     ResponseEntity<Object> getWalletByIntasendWalletId(String intasendWalletId);
     ResponseEntity<Object> getAllWallets(String name, Boolean isSystemWallet, LocalDate createdAtStartDate, LocalDate createdAtEndDate, LocalDate updatedAtStartDate, LocalDate updatedAtEndDate, Integer page, Integer size);
+    ResponseEntity<Object> transferBetweenWallets(String fromIntasendWalletId, WalletTransferRequestDto request);
 }

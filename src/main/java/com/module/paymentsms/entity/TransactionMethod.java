@@ -7,4 +7,5 @@ public enum TransactionMethod {
     INTASEND_B_T_B_MPESA_TILL,
     INTASEND_B_T_B_MPESA_PAYBILL,
     INTASEND_B_T_C_MPESA,
+    INTASEND_WALLET_TRANSFER,
 }
