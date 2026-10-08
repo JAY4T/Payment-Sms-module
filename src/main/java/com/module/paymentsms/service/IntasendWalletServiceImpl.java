@@ -187,21 +187,55 @@ public class IntasendWalletServiceImpl implements IntasendWalletService {
         }
 
         LocalDateTime now = LocalDateTime.now();
-        Transaction transaction = Transaction.builder()
-                .transactionRef("TRANSFER_" + UUID.randomUUID())
-                .sender(fromWallet.getName())
-                .method(TransactionMethod.INTASEND_WALLET_TRANSFER)
-                .type("DEBIT")
-                .currency("KES")
-                .amount(request.getAmount())
-                .status("PENDING")
-                .narration(request.getNarrative())
-                .createdAt(now)
-                .updatedAt(now)
-                .callbacks(new ArrayList<>())
-                .wallet(fromWallet)
-                .build();
-        transaction = transactionDao.createTransaction(transaction);
+
+        // Idempotency: the key becomes the transaction_ref, which is UNIQUE. See
+        // WalletTransferRequestDto.idempotencyKey for why this exists.
+        boolean keyed = request.getIdempotencyKey() != null && !request.getIdempotencyKey().isBlank();
+        String transactionRef = keyed
+                ? "TRANSFER_" + request.getIdempotencyKey()
+                : "TRANSFER_" + UUID.randomUUID();
+
+        Transaction transaction = null;
+        if (keyed) {
+            Transaction prior = transactionDao.getTransactionByReference(transactionRef);
+            if (prior != null) {
+                if ("COMPLETED".equals(prior.getStatus())) {
+                    log.info("Wallet transfer {} already completed (transaction {}); returning the original result",
+                            request.getIdempotencyKey(), prior.getId());
+                    return transactionDtoMapper.toTransactionDto(prior);
+                }
+                if ("PENDING".equals(prior.getStatus())) {
+                    throw new RuntimeException("Wallet transfer " + request.getIdempotencyKey()
+                            + " is still in flight (transaction " + prior.getId() + "); retry once it settles");
+                }
+                // FAILED: reuse the same row so the retry keeps the same reference and stays
+                // idempotent for any later retry.
+                transaction = prior;
+                transaction.setStatus("PENDING");
+                transaction.setFailureReason(null);
+                transaction.setUpdatedAt(now);
+            }
+        }
+
+        if (transaction == null) {
+            transaction = Transaction.builder()
+                    .transactionRef(transactionRef)
+                    .sender(fromWallet.getName())
+                    .method(TransactionMethod.INTASEND_WALLET_TRANSFER)
+                    .type("DEBIT")
+                    .currency("KES")
+                    .amount(request.getAmount())
+                    .status("PENDING")
+                    .narration(request.getNarrative())
+                    .createdAt(now)
+                    .updatedAt(now)
+                    .callbacks(new ArrayList<>())
+                    .wallet(fromWallet)
+                    .build();
+            // Flush so a concurrent caller racing the same idempotency key trips the UNIQUE
+            // constraint here, before either of us calls Intasend.
+            transaction = transactionDao.createTransactionAndFlush(transaction);
+        }
 
         try {
             Map<String, Object> result = callIntraTransfer(fromIntasendWalletId, request);

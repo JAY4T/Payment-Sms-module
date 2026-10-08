@@ -15,6 +15,7 @@ import java.util.List;
 public class IntasendMpesaBTCDto {
     private String currency;
     private Long walletId;
+    private Boolean requiresApproval;
     private List<MpesaBTCTransactionDto> transactions;
     
     @Data

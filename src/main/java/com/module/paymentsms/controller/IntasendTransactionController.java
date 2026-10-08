@@ -3,6 +3,7 @@ package com.module.paymentsms.controller;
 import com.module.paymentsms.dto.IntasendBankPayoutDto;
 import com.module.paymentsms.dto.IntasendCheckoutCreationDto;
 import com.module.paymentsms.dto.IntasendMpesaBTBPaybillDto;
+import com.module.paymentsms.dto.IntasendMpesaBTCDto;
 import org.springframework.http.ResponseEntity;
 
 import java.util.Map;
@@ -11,6 +12,7 @@ public interface IntasendTransactionController {
     ResponseEntity<Object> checkout(IntasendCheckoutCreationDto intasendCheckoutCreationDto) throws Exception;
     ResponseEntity<Object> btbPayBill(IntasendMpesaBTBPaybillDto intasendMpesaBTBPaybillDto);
     ResponseEntity<Object> btbBankPayout(IntasendBankPayoutDto intasendBankPayoutDto);
+    ResponseEntity<Object> btcMpesa(IntasendMpesaBTCDto intasendMpesaBTCDto);
     ResponseEntity<Object> getTransactionById(Long id);
     ResponseEntity<Object> getTransactionByRef(String transactionRef);
     ResponseEntity<Object> reconcileCollectionTransaction(Long id);

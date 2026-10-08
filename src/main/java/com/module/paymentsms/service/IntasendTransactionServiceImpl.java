@@ -2,13 +2,13 @@ package com.module.paymentsms.service;
 
 import com.google.gson.Gson;
 import com.module.paymentsms.config.RabbitConfig;
+import com.module.paymentsms.dao.OutboxEventDao;
 import com.module.paymentsms.dao.TransactionDao;
 import com.module.paymentsms.dao.WalletDao;
 import com.module.paymentsms.dto.*;
 import com.module.paymentsms.entity.*;
 import com.module.paymentsms.mapper.TransactionDtoMapper;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationContext;
@@ -40,14 +40,20 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
 
     private final TransactionDao transactionDao;
     private final WalletDao walletDao;
+    private final OutboxEventDao outboxEventDao;
 
     private final IntasendWalletService intasendWalletService;
     private final TransactionDtoMapper transactionDtoMapper;
     private final ApplicationContext applicationContext;
     private final TransactionTemplate transactionTemplate;
-    private final RabbitTemplate rabbitTemplate;
 
     private final ConcurrentHashMap<Long, LocalDateTime> pendingTransactions = new ConcurrentHashMap<>();
+
+    // Dedicated, non-shared mapper: the outbox payload must not inherit whatever default typing or
+    // naming strategy the application-wide ObjectMapper bean is configured with, because the body
+    // ends up on the wire for a different service to read.
+    private static final com.fasterxml.jackson.databind.ObjectMapper OUTBOX_JSON_MAPPER =
+            new com.fasterxml.jackson.databind.ObjectMapper();
 
     @Value("${intasend.mpesa.checkout.url}")
     private String mpesaCheckoutUrl;
@@ -73,24 +79,36 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
     @Value("${intasend.sendmoney.status.url}")
     private String intasendSendMoneyStatusUrl;
 
+    // Applied to every checkout that doesn't carry its own tarrif. BUSINESS-PAYS preserves the
+    // behaviour Intasend accounts were created with (the business absorbs the fee) rather than
+    // silently changing who pays.
+    @Value("${intasend.tarrif.default:BUSINESS-PAYS}")
+    private String defaultTarrif;
+
+    // Upper bound on how many rows each reconciliation sweep pulls per run. Without it the sweeps
+    // load every pending row into memory and reconcile them in one pass, so a broker outage that
+    // lets a backlog build up turns the next run into an unbounded burst of provider calls.
+    @Value("${reconciliation.sweep.batch-size:500}")
+    private int sweepBatchSize;
+
 
     @Autowired
     public IntasendTransactionServiceImpl(
             TransactionDao transactionDao,
             WalletDao walletDao,
+            OutboxEventDao outboxEventDao,
             IntasendWalletService intasendWalletService,
             TransactionDtoMapper transactionDtoMapper,
             ApplicationContext applicationContext,
-            PlatformTransactionManager transactionManager,
-            RabbitTemplate rabbitTemplate
+            PlatformTransactionManager transactionManager
     ) {
         this.transactionDao = transactionDao;
         this.walletDao = walletDao;
+        this.outboxEventDao = outboxEventDao;
         this.intasendWalletService = intasendWalletService;
         this.transactionDtoMapper = transactionDtoMapper;
         this.applicationContext = applicationContext;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
-        this.rabbitTemplate = rabbitTemplate;
     }
 
     @Override
@@ -105,6 +123,10 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
 
         Wallet wallet = walletDao.getWalletById(intasendCheckoutCreationDto.getWalletId());
 
+        // Resolved (and validated) before the PENDING row is written, so an unknown value fails
+        // the caller's request instead of being stored and blowing up at the Intasend call.
+        IntasendTarrif tarrif = resolveTarrif(intasendCheckoutCreationDto.getTarrif());
+
         Transaction transaction = Transaction.builder()
                 .transactionRef(transactionRef)
                 .sender(intasendCheckoutCreationDto.getPhoneNumber())
@@ -114,6 +136,7 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                 .amount(intasendCheckoutCreationDto.getAmount())
                 .status("PENDING")
                 .narration(intasendCheckoutCreationDto.getNotes())
+                .feeBearing(tarrif.getValue())
                 .createdAt(now)
                 .updatedAt(now)
                 .callbacks(new ArrayList<>())
@@ -828,7 +851,7 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
     // longer delays or a restart in between.
     @Scheduled(fixedDelay = 60000)
     public void reconcilePendingSendMoneyBatches() {
-        List<Transaction> pendingBatches = transactionDao.getPendingSendMoneyBatches();
+        List<Transaction> pendingBatches = transactionDao.getPendingSendMoneyBatches(sweepBatchSize);
 
         if (pendingBatches.isEmpty()) {
             return;
@@ -851,7 +874,7 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
     // (INTASEND_MPESA_STK / INTASEND_CHECKOUT_LINK) instead of send-money batches.
     @Scheduled(fixedDelay = 60000)
     public void reconcilePendingCollectionTransactions() {
-        List<Transaction> pendingCollections = transactionDao.getPendingCollectionTransactions();
+        List<Transaction> pendingCollections = transactionDao.getPendingCollectionTransactions(sweepBatchSize);
 
         if (pendingCollections.isEmpty()) {
             return;
@@ -875,7 +898,7 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
     // settles - lower urgency than the reconciliation jobs above, hence the longer interval.
     @Scheduled(fixedDelay = 120000)
     public void updatePendingClearingStatuses() {
-        List<Transaction> pending = transactionDao.getCollectionTransactionsPendingClearingStatus();
+        List<Transaction> pending = transactionDao.getCollectionTransactionsPendingClearingStatus(sweepBatchSize);
 
         if (pending.isEmpty()) {
             return;
@@ -1065,13 +1088,13 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
         }
 
         if ("COMPLETED".equals(transaction.getStatus())) {
-            publishTransactionEvent(transaction, "transaction.completed");
+            enqueueTransactionEvent(transaction, "transaction.completed");
         } else if ("FAILED".equals(transaction.getStatus())) {
-            publishTransactionEvent(transaction, "transaction.failed");
+            enqueueTransactionEvent(transaction, "transaction.failed");
         } else if ("PROCESSING".equals(transaction.getStatus())) {
             // Not terminal, but a caller (e.g. mledger) still needs to know a payment is
             // genuinely in flight rather than assuming its own initial state forever.
-            publishTransactionEvent(transaction, "transaction.processing");
+            enqueueTransactionEvent(transaction, "transaction.processing");
         }
 
         log.info("Callback processed for transaction {}: status={}", transaction.getTransactionRef(), transaction.getStatus());
@@ -1099,32 +1122,60 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
         log.info("Clearing status updated for transaction {}: {}", transaction.getTransactionRef(), clearingStatus);
 
         if ("AVAILABLE".equals(clearingStatus)) {
-            publishTransactionEvent(transaction, "transaction.cleared");
+            enqueueTransactionEvent(transaction, "transaction.cleared");
         }
     }
 
-    // Fire-and-forget: a broker outage must never fail payment processing itself, so any
-    // publish failure is logged and swallowed rather than propagated. Covers all three
-    // producers of a clearing/settlement change - the real webhook (processCollectionCallback),
-    // the manual reconcile endpoint (reconcileCollectionTransaction, which re-enters through
-    // handleCallback), and the scheduled clearing-status sweep (updatePendingClearingStatuses) -
-    // since all three ultimately call updateClearingStatus.
-    private void publishTransactionEvent(Transaction transaction, String routingKey) {
+    // Durably enqueues the event instead of publishing it inline (Sprint 1, F11).
+    //
+    // This used to be a fire-and-forget convertAndSend in a try/catch that logged and swallowed
+    // the failure. A broker outage, an undeclared exchange, or a crash between committing the
+    // status change and publishing it lost the event outright - and downstream that event was the
+    // only thing that moved a seller's, team's or club's money out of the clearing wallet. Nothing
+    // retried, and nothing recorded the loss. The event is now a row committed with the state
+    // change and published (with retries) by OutboxRelayService, so it can be delayed but not lost.
+    //
+    // The event id is derived from the transaction reference and the routing key rather than
+    // random, so a retried provider callback enqueues the same logical event exactly once.
+    private void enqueueTransactionEvent(Transaction transaction, String routingKey) {
+        TransactionEventDto event = TransactionEventDto.builder()
+                .id(transaction.getId())
+                .eventId(transaction.getTransactionRef() + ":" + routingKey)
+                .reference(transaction.getTransactionRef())
+                .walletId(transaction.getWallet() != null ? transaction.getWallet().getId() : null)
+                .amount(transaction.getAmount() != null ? String.valueOf(transaction.getAmount()) : null)
+                .currency(transaction.getCurrency())
+                .fee(transaction.getFee() != null ? String.valueOf(transaction.getFee()) : null)
+                .status(transaction.getStatus())
+                .narration(transaction.getNarration())
+                .build();
+
+        enqueueEvent(event, routingKey);
+    }
+
+    private void enqueueEvent(TransactionEventDto event, String routingKey) {
+        LocalDateTime now = LocalDateTime.now();
+        transactionTemplate.executeWithoutResult(status -> outboxEventDao.insertIfAbsent(OutboxEvent.builder()
+                .eventId(event.getEventId())
+                .exchangeName(RabbitConfig.TRANSACTIONS_EXCHANGE)
+                .routingKey(routingKey)
+                .payload(toJson(event))
+                .status(OutboxEvent.STATUS_PENDING)
+                .attempts(0)
+                .createdAt(now)
+                .nextAttemptAt(now)
+                .build()));
+        log.info("Enqueued {} for transaction {}", routingKey, event.getReference());
+    }
+
+    // Serialised with Jackson so the stored payload is the same JSON the message body would have
+    // been. The relay re-reads it into an Object and hands it to the same Jackson2JsonMessageConverter
+    // convertAndSend used here, so consumers receive the same body as before.
+    private String toJson(TransactionEventDto event) {
         try {
-            TransactionEventDto event = TransactionEventDto.builder()
-                    .id(transaction.getId())
-                    .reference(transaction.getTransactionRef())
-                    .walletId(transaction.getWallet() != null ? transaction.getWallet().getId() : null)
-                    .amount(transaction.getAmount() != null ? String.valueOf(transaction.getAmount()) : null)
-                    .currency(transaction.getCurrency())
-                    .fee(transaction.getFee() != null ? String.valueOf(transaction.getFee()) : null)
-                    .status(transaction.getStatus())
-                    .narration(transaction.getNarration())
-                    .build();
-            rabbitTemplate.convertAndSend(RabbitConfig.TRANSACTIONS_EXCHANGE, routingKey, event);
-            log.info("Published {} for transaction {}", routingKey, transaction.getTransactionRef());
-        } catch (Exception e) {
-            log.error("Failed to publish {} for transaction {}: {}", routingKey, transaction.getTransactionRef(), e.getMessage(), e);
+            return OUTBOX_JSON_MAPPER.writeValueAsString(event);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException("Could not serialise outbox event " + event.getEventId(), e);
         }
     }
 
@@ -1259,9 +1310,9 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                     // correlates back to its own record via this child's narration, which it
                     // set itself when building the batch request.
                     if ("COMPLETED".equals(newChildStatus)) {
-                        publishTransactionEvent(childTransaction, "payout.completed");
+                        enqueueTransactionEvent(childTransaction, "payout.completed");
                     } else if ("FAILED".equals(newChildStatus)) {
-                        publishTransactionEvent(childTransaction, "payout.failed");
+                        enqueueTransactionEvent(childTransaction, "payout.failed");
                     }
                 } else {
                     log.warn("Child transaction not found for intasend_transaction_id: {}", intasendTxnId);
@@ -1296,15 +1347,48 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
         }
     }
 
+    // Caller-supplied tarrif wins; otherwise the configured default. Never null - an absent
+    // default would be a configuration error, not something to paper over at request time.
+    private IntasendTarrif resolveTarrif(String requested) {
+        IntasendTarrif tarrif = IntasendTarrif.fromValue(
+                org.springframework.util.StringUtils.hasText(requested) ? requested : defaultTarrif);
+        if (tarrif == null) {
+            throw new IllegalArgumentException("intasend.tarrif.default must be BUSINESS-PAYS or CUSTOMER-PAYS");
+        }
+        return tarrif;
+    }
+
+    // Tarrif is sent per channel. Intasend's checkout endpoint documents all five; the
+    // paymentlinks (hosted checkout link) endpoint only documents mobile and card.
+    private Map<String, String> fullChannelTarrifs(Transaction transaction) {
+        String tarrif = resolveTarrif(transaction.getFeeBearing()).getValue();
+        return Map.of(
+                "mobile_tarrif", tarrif,
+                "card_tarrif", tarrif,
+                "bitcoin_tarrif", tarrif,
+                "ach_tarrif", tarrif,
+                "bank_tarrif", tarrif
+        );
+    }
+
+    private Map<String, String> mobileAndCardTarrifs(Transaction transaction) {
+        String tarrif = resolveTarrif(transaction.getFeeBearing()).getValue();
+        return Map.of(
+                "mobile_tarrif", tarrif,
+                "card_tarrif", tarrif
+        );
+    }
+
     // Intasend M-Pesa STK push checkout
     private Transaction intasendMpesaStkCheckout(Transaction transaction) throws Exception {
 
-        Map<String, Object> requestBody = Map.of(
+        Map<String, Object> requestBody = new java.util.HashMap<>(Map.<String, Object>of(
                 "amount", String.valueOf(transaction.getAmount()),
                 "phone_number", transaction.getSender(),
                 "wallet_id", transaction.getWallet().getIntasendWalletId(),
                 "api_ref", transaction.getTransactionRef()
-        );
+        ));
+        requestBody.putAll(fullChannelTarrifs(transaction));
 
         Gson gson = new Gson();
         String jsonBody = gson.toJson(requestBody);
@@ -1349,12 +1433,13 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
 
     // Intasend hosted checkout link
     private Transaction intasendCheckoutLink(Transaction transaction, String redirectUrl) throws URISyntaxException, IOException, InterruptedException {
-        Map<String, Object> requestBody = new java.util.HashMap<>(Map.of(
+        Map<String, Object> requestBody = new java.util.HashMap<>(Map.<String, Object>of(
                 "amount", String.valueOf(transaction.getAmount()),
                 "phone_number", transaction.getSender(),
                 "wallet_id", transaction.getWallet().getIntasendWalletId(),
                 "api_ref", transaction.getTransactionRef()
         ));
+        requestBody.putAll(mobileAndCardTarrifs(transaction));
         // Intasend sends the browser here once payment completes - without it, there's no way
         // for the caller's own app/site to be notified except by polling, since the hosted
         // checkout page has no "back to merchant" affordance of its own.
@@ -1406,7 +1491,12 @@ public class IntasendTransactionServiceImpl implements IntasendTransactionServic
                     "account", txnDto.getRecipientPhoneNumber(),
                     "amount", txnDto.getAmount().toString(),
                     "narrative", txnDto.getNarration() != null ? txnDto.getNarration() : "",
-                    "requires_approval", true
+                    // Caller-controllable, but the DEFAULT is to require approval. An omitted field
+                    // only ever sends more money (this is a payout), so it must fail safe: a caller
+                    // that genuinely wants automatic disbursement has to say so explicitly, which
+                    // LigiOpen's refund and payout paths both do
+                    // (TicketService.initiateRefundPayout, PayoutService batch bank payouts).
+                    "requires_approval", dto.getRequiresApproval() != null ? dto.getRequiresApproval() : true
             );
             transactionItems.add(item);
             index++;

@@ -43,4 +43,11 @@ public class Wallet {
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
 
+    // Optimistic locking: wallet balances are updated by the transaction webhook, the
+    // reconciliation sweeps and intasendWalletService.syncWallet, all of which read-modify-write
+    // the same row.
+    @Version
+    @Column(name = "version", nullable = false)
+    private Long version;
+
 }

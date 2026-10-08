@@ -38,6 +38,13 @@ public class TransactionDaoImpl implements TransactionDao{
     }
 
     @Override
+    public Transaction createTransactionAndFlush(Transaction transaction) {
+        entityManager.persist(transaction);
+        entityManager.flush();
+        return transaction;
+    }
+
+    @Override
     public Transaction updateTransaction(Transaction transaction) {
         entityManager.merge(transaction);
         return transaction;
@@ -211,27 +218,33 @@ public class TransactionDaoImpl implements TransactionDao{
     }
 
     @Override
-    public List<Transaction> getPendingSendMoneyBatches() {
+    public List<Transaction> getPendingSendMoneyBatches(int limit) {
         TypedQuery<Transaction> query = entityManager.createQuery(
-                "SELECT t FROM Transaction t WHERE t.hasBatch = true AND t.status IN ('PENDING', 'PROCESSING') AND t.intasendTrackingId IS NOT NULL",
+                "SELECT t FROM Transaction t WHERE t.hasBatch = true AND t.status IN ('PENDING', 'PROCESSING') AND t.intasendTrackingId IS NOT NULL " +
+                        "ORDER BY t.createdAt ASC",
                 Transaction.class);
+        query.setMaxResults(limit);
         return query.getResultList();
     }
 
     @Override
-    public List<Transaction> getPendingCollectionTransactions() {
+    public List<Transaction> getPendingCollectionTransactions(int limit) {
         TypedQuery<Transaction> query = entityManager.createQuery(
-                "SELECT t FROM Transaction t WHERE t.status IN ('PENDING', 'PROCESSING') AND t.invoiceId IS NOT NULL",
+                "SELECT t FROM Transaction t WHERE t.status IN ('PENDING', 'PROCESSING') AND t.invoiceId IS NOT NULL " +
+                        "ORDER BY t.createdAt ASC",
                 Transaction.class);
+        query.setMaxResults(limit);
         return query.getResultList();
     }
 
     @Override
-    public List<Transaction> getCollectionTransactionsPendingClearingStatus() {
+    public List<Transaction> getCollectionTransactionsPendingClearingStatus(int limit) {
         TypedQuery<Transaction> query = entityManager.createQuery(
                 "SELECT t FROM Transaction t WHERE t.status = 'COMPLETED' AND t.invoiceId IS NOT NULL " +
-                        "AND (t.clearingStatus IS NULL OR t.clearingStatus <> 'AVAILABLE')",
+                        "AND (t.clearingStatus IS NULL OR t.clearingStatus <> 'AVAILABLE') " +
+                        "ORDER BY t.createdAt ASC",
                 Transaction.class);
+        query.setMaxResults(limit);
         return query.getResultList();
     }
 }

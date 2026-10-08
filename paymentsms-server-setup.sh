@@ -6,6 +6,30 @@
 
 set -e
 
+# ---------------------------------------------------------------------------
+# Database password for the paymentsms_user role.
+#
+# This script is committed to the repository, so the password must never be a
+# literal here. Supply it explicitly:
+#     sudo DB_PASSWORD='...' ./paymentsms-server-setup.sh
+# or let the script generate a strong one. On re-runs with no DB_PASSWORD, the
+# value already present in /etc/env/paymentsms_prod.env is reused so the
+# database role and the application config can never drift apart.
+# Restricted to [A-Za-z0-9] because the value is interpolated into SQL here and
+# into an unquoted .env assignment later.
+# ---------------------------------------------------------------------------
+if [ -z "${DB_PASSWORD:-}" ] && [ -r /etc/env/paymentsms_prod.env ]; then
+    DB_PASSWORD="$(sed -n 's/^SPRING_DATASOURCE_PASSWORD=//p' /etc/env/paymentsms_prod.env | head -n1)"
+fi
+if [ -z "${DB_PASSWORD:-}" ]; then
+    DB_PASSWORD="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)"
+    DB_PASSWORD_GENERATED=1
+fi
+if [[ ! "$DB_PASSWORD" =~ ^[A-Za-z0-9]{8,}$ ]]; then
+    echo "❌ DB_PASSWORD must be at least 8 characters of A-Z, a-z or 0-9."
+    exit 1
+fi
+
 echo "=========================================="
 echo "🚀 PaymentSMS Fresh Server Setup"
 echo "=========================================="
@@ -116,7 +140,10 @@ PG_VERSION=$(sudo -u postgres psql -t -c "SELECT version();" | grep -oP "Postgre
 echo "   PostgreSQL version: $PG_VERSION"
 
 # Create database user and databases
-sudo -u postgres psql -c "CREATE USER paymentsms_user WITH PASSWORD 'PaymentSMS#2024#Secure';" 2>/dev/null || echo "   ℹ️  User paymentsms_user already exists"
+sudo -u postgres psql -c "CREATE USER paymentsms_user WITH PASSWORD '${DB_PASSWORD}';" 2>/dev/null || echo "   ℹ️  User paymentsms_user already exists"
+# Keep the role's password in sync with the value written into the .env files
+# below - a re-run must not leave the app authenticating with a stale password.
+sudo -u postgres psql -q -c "ALTER USER paymentsms_user WITH PASSWORD '${DB_PASSWORD}';"
 sudo -u postgres psql -c "CREATE DATABASE prod_paymentsms OWNER paymentsms_user;" 2>/dev/null || echo "   ℹ️  Database prod_paymentsms already exists"
 sudo -u postgres psql -c "CREATE DATABASE dev_paymentsms OWNER paymentsms_user;" 2>/dev/null || echo "   ℹ️  Database dev_paymentsms already exists"
 
@@ -166,8 +193,8 @@ cat > /etc/env/paymentsms_prod.env << 'EOF'
 # Production Environment Variables for PaymentSMS
 SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/prod_paymentsms
 SPRING_DATASOURCE_USERNAME=paymentsms_user
-SPRING_DATASOURCE_PASSWORD=PaymentSMS#2024#Secure
-SPRING_JPA_HIBERNATE_DDL_AUTO=update
+SPRING_DATASOURCE_PASSWORD=__DB_PASSWORD_PLACEHOLDER__
+SPRING_JPA_HIBERNATE_DDL_AUTO=validate
 SPRING_JPA_SHOW_SQL=false
 SPRING_JPA_PROPERTIES_HIBERNATE_DIALECT=org.hibernate.dialect.PostgreSQLDialect
 SPRING_JPA_PROPERTIES_HIBERNATE_FORMAT_SQL=true
@@ -191,8 +218,8 @@ cat > /etc/env/paymentsms_dev.env << 'EOF'
 # Development Environment Variables for PaymentSMS
 SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/dev_paymentsms
 SPRING_DATASOURCE_USERNAME=paymentsms_user
-SPRING_DATASOURCE_PASSWORD=PaymentSMS#2024#Secure
-SPRING_JPA_HIBERNATE_DDL_AUTO=update
+SPRING_DATASOURCE_PASSWORD=__DB_PASSWORD_PLACEHOLDER__
+SPRING_JPA_HIBERNATE_DDL_AUTO=validate
 SPRING_JPA_SHOW_SQL=true
 SPRING_JPA_PROPERTIES_HIBERNATE_DIALECT=org.hibernate.dialect.PostgreSQLDialect
 SPRING_JPA_PROPERTIES_HIBERNATE_FORMAT_SQL=true
@@ -210,6 +237,10 @@ LOGGING_FILE_PATH=/home/pipeline/logs/paymentsms_dev
 # Additional Development Settings
 SPRING_PROFILES_ACTIVE=dev
 EOF
+
+# Substitute the generated/supplied database password into the env files. The
+# heredocs above are quoted ('EOF') so no expansion happens while they are written.
+sed -i "s|__DB_PASSWORD_PLACEHOLDER__|${DB_PASSWORD}|g" /etc/env/paymentsms_prod.env /etc/env/paymentsms_dev.env
 
 # Set proper permissions for environment files
 chmod 640 /etc/env/*.env
@@ -506,7 +537,11 @@ echo "🗄️  Database Information:"
 echo "   Production DB: prod_paymentsms"
 echo "   Development DB: dev_paymentsms"
 echo "   DB User: paymentsms_user"
-echo "   DB Password: PaymentSMS#2024#Secure"
+echo "   DB Password: stored in /etc/env/paymentsms_prod.env (root+pipeline, mode 640)"
+if [ -n "${DB_PASSWORD_GENERATED:-}" ]; then
+echo "   ⚠️  A NEW RANDOM password was generated for this role. Record it now:"
+echo "       sudo grep SPRING_DATASOURCE_PASSWORD /etc/env/paymentsms_prod.env"
+fi
 echo ""
 echo "🔧 Next Steps:"
 echo "1. Add your SSH public key to /home/pipeline/.ssh/authorized_keys"

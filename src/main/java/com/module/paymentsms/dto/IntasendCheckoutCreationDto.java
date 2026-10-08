@@ -26,4 +26,9 @@ public class IntasendCheckoutCreationDto {
     // globally unique (enforced by transactions.transaction_ref) - the caller's problem if it
     // collides. Omit to get the usual auto-generated <timestamp>_<uuid>_MAG reference.
     private String reference;
+
+    // Optional: who bears the Intasend transaction cost - BUSINESS-PAYS (the collecting business
+    // absorbs it) or CUSTOMER-PAYS (added to what the customer pays). Also accepts LIGIOPEN as an
+    // alias for BUSINESS-PAYS. Omit to use intasend.tarrif.default, which is BUSINESS-PAYS.
+    private String tarrif;
 }

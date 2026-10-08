@@ -4,6 +4,7 @@ import com.module.paymentsms.config.BuildResponse;
 import com.module.paymentsms.dto.IntasendBankPayoutDto;
 import com.module.paymentsms.dto.IntasendCheckoutCreationDto;
 import com.module.paymentsms.dto.IntasendMpesaBTBPaybillDto;
+import com.module.paymentsms.dto.IntasendMpesaBTCDto;
 import com.module.paymentsms.dto.TransactionDto;
 import com.module.paymentsms.service.IntasendTransactionService;
 import lombok.extern.slf4j.Slf4j;
@@ -62,6 +63,21 @@ public class IntasendTransactionControllerImpl implements IntasendTransactionCon
         } catch (Exception e) {
             log.error("Error initiating bank payout: {}", e.getMessage(), e);
             return buildResponse.error("Bank payout failed: " + e.getMessage(), null, HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    @Override
+    // M-Pesa B2C send-money to a phone number - used for real "refund" money-back where a
+    // reversal of the original STK collection isn't a thing M-Pesa/Intasend support; this sends a
+    // new payment to the customer instead, the same way a bank payout sends one to a bank account.
+    @PostMapping("/btc-mpesa")
+    public ResponseEntity<Object> btcMpesa(@RequestBody IntasendMpesaBTCDto intasendMpesaBTCDto) {
+        try {
+            TransactionDto transaction = intasendTransactionService.btcMpesa(intasendMpesaBTCDto);
+            return buildResponse.success(transaction, "M-Pesa B2C payout initiated successfully", null, HttpStatus.CREATED);
+        } catch (Exception e) {
+            log.error("Error initiating M-Pesa B2C payout: {}", e.getMessage(), e);
+            return buildResponse.error("M-Pesa B2C payout failed: " + e.getMessage(), null, HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
 

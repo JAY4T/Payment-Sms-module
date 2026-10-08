@@ -91,4 +91,18 @@ public class Transaction {
 
     @Column(name = "clearing_status")
     private String clearingStatus;
+
+    // The Intasend tarrif this transaction was created with (BUSINESS-PAYS / CUSTOMER-PAYS) -
+    // recorded so a later reconciliation can tell whether the fee was meant to come out of the
+    // business's proceeds or be added to the customer's, without having to guess from amounts.
+    @Column(name = "fee_bearing", length = 30)
+    private String feeBearing;
+
+    // Optimistic locking. Two writers really do race on this row: the Intasend webhook
+    // (processCollectionCallback) and the scheduled clearing-status sweep
+    // (updatePendingClearingStatuses) can both decide to move the same transaction out of
+    // PENDING. Without a version, the second writer silently overwrites the first.
+    @Version
+    @Column(name = "version", nullable = false)
+    private Long version;
 }

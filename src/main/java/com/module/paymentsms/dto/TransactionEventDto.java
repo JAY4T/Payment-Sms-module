@@ -14,6 +14,10 @@ import lombok.experimental.SuperBuilder;
 @SuperBuilder
 public class TransactionEventDto {
     private Long id;
+    // Stable across retries of the same logical event (<transactionRef>:<routingKey>), so a
+    // consumer can deduplicate a redelivery. Optional for backward compatibility - an older
+    // consumer that ignores it still behaves as before.
+    private String eventId;
     private String reference;
     private Long walletId;
     private String amount;
